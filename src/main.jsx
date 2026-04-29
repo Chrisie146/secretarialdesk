@@ -625,7 +625,9 @@ function App() {
     const [
       { data: trustShareholderRows, error: trustShareholdersError },
       { data: trustReviewRows, error: trustReviewsError },
-      { data: trustDocumentRows, error: trustDocumentsError }
+      { data: trustDocumentRows, error: trustDocumentsError },
+      { data: entityShareholderRows, error: entityShareholdersError },
+      { data: entityReviewRows, error: entityReviewsError }
     ] = await Promise.all([
       supabase
         .from('shareholders')
@@ -640,10 +642,19 @@ function App() {
         .from('documents')
         .select('id, company_id, document_type, original_filename, file_path, status, extracted_data')
         .in('company_id', companyIds)
-        .eq('document_type', 'trust_deed')
+        .eq('document_type', 'trust_deed'),
+      supabase
+        .from('shareholders')
+        .select('id, company_id, shareholder_type, name, id_number, ownership_percentage, trust_profile_id')
+        .in('company_id', companyIds)
+        .eq('shareholder_type', 'company'),
+      supabase
+        .from('entity_ownership_reviews')
+        .select('id, company_id, shareholder_id, owners, notes, reviewed_at, created_at')
+        .in('company_id', companyIds)
     ]);
 
-    if (trustShareholdersError || trustReviewsError || trustDocumentsError) return;
+    if (trustShareholdersError || trustReviewsError || trustDocumentsError || entityShareholdersError || entityReviewsError) return;
 
     setCompanyDetails((current) => {
       const next = { ...current };
@@ -651,8 +662,12 @@ function App() {
         const existing = next[companyId] || createEmptyCompanyDetail();
         next[companyId] = {
           ...existing,
-          shareholders: mergeById(existing.shareholders || [], (trustShareholderRows || []).filter((row) => row.company_id === companyId).map(mapShareholderRow)),
+          shareholders: mergeById(existing.shareholders || [], [
+            ...(trustShareholderRows || []).filter((row) => row.company_id === companyId).map(mapShareholderRow),
+            ...(entityShareholderRows || []).filter((row) => row.company_id === companyId).map(mapShareholderRow)
+          ]),
           trustReviews: mergeById(existing.trustReviews || [], (trustReviewRows || []).filter((row) => row.company_id === companyId).map(mapTrustReviewRow)),
+          entityOwnershipReviews: mergeById(existing.entityOwnershipReviews || [], (entityReviewRows || []).filter((row) => row.company_id === companyId).map(mapEntityOwnershipReviewRow)),
           documents: mergeById(existing.documents || [], (trustDocumentRows || []).filter((row) => row.company_id === companyId).map(mapDocumentRow))
         };
       }
@@ -6857,9 +6872,7 @@ function EntityOwnershipReviewPanel({ entityShareholders, entityOwnershipReviews
       <div className="space-y-4 p-4">
         {entityShareholders.map((entity) => {
           const review = entityOwnershipReviews.find((item) => String(item.shareholderId) === String(entity.id));
-          const lookupKey = entity.idNumber?.trim().toLowerCase();
-          const match = lookupKey ? entityReviewLookup?.[lookupKey] : null;
-          const suggestion = !review && match && match.sourceCompanyId !== currentCompanyId ? match : null;
+          const suggestion = !review ? findEntityReviewSuggestion(entity, entityReviewLookup, currentCompanyId) : null;
           return (
             <EntityOwnershipReviewCard
               key={entity.id}
@@ -6941,6 +6954,7 @@ function EntityOwnershipReviewCard({ entity, review, suggestion, onSaveEntityOwn
       {suggestion && (
         <div className="mb-4 flex flex-col gap-2 rounded-md border border-sky-200 bg-sky-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm text-sky-900">
+            <span className="font-semibold">{suggestion.matchLabel || 'Look-through suggestion found'}:</span>{' '}
             <span className="font-semibold">{suggestion.entityName}</span> was reviewed
             {suggestion.review.reviewedAt ? ` on ${new Date(suggestion.review.reviewedAt).toLocaleDateString('en-ZA')}` : ''} for{' '}
             <span className="font-semibold">{suggestion.sourceCompanyName}</span> — import that look-through?
@@ -9106,19 +9120,56 @@ function filingSubmissionLabel(status) {
 
 function buildEntityReviewLookup(companies, companyDetails) {
   const lookup = {};
+  const addLookup = (key, candidate) => {
+    if (!key) return;
+    const existing = lookup[key];
+    const candidateDate = candidate.review.reviewedAt || candidate.review.createdAt || '';
+    const existingDate = existing?.review?.reviewedAt || existing?.review?.createdAt || '';
+    if (!existing || candidate.matchStrength === 'registration' && existing.matchStrength !== 'registration' || candidateDate > existingDate) {
+      lookup[key] = candidate;
+    }
+  };
+
   companies.forEach((company) => {
     const detail = companyDetails[company.id];
     if (!detail) return;
     (detail.entityOwnershipReviews || []).forEach((review) => {
       const shareholder = (detail.shareholders || []).find((s) => String(s.id) === String(review.shareholderId));
-      if (!shareholder?.idNumber) return;
-      const key = shareholder.idNumber.trim().toLowerCase();
-      if (!lookup[key] || (review.reviewedAt || '') > (lookup[key].review.reviewedAt || '')) {
-        lookup[key] = { review, sourceCompanyName: company.name, sourceCompanyId: company.id, entityName: shareholder.name };
-      }
+      if (!shareholder) return;
+      const base = { review, sourceCompanyName: company.name, sourceCompanyId: company.id, entityName: shareholder.name };
+      const registrationKey = normalizeEntityRegistrationKey(shareholder.idNumber);
+      const nameKey = normalizeEntityNameKey(shareholder.name);
+      addLookup(registrationKey, { ...base, matchStrength: 'registration', matchLabel: 'Look-through suggestion found' });
+      addLookup(nameKey, { ...base, matchStrength: 'name', matchLabel: 'Possible match by name' });
+      addLookup(registrationKey && nameKey ? `${nameKey}|${registrationKey}` : '', { ...base, matchStrength: 'registration', matchLabel: 'Look-through suggestion found' });
     });
   });
   return lookup;
+}
+
+function findEntityReviewSuggestion(entity, entityReviewLookup, currentCompanyId) {
+  const registrationKey = normalizeEntityRegistrationKey(entity.idNumber);
+  const nameKey = normalizeEntityNameKey(entity.name);
+  const combinedKey = registrationKey && nameKey ? `${nameKey}|${registrationKey}` : '';
+  const candidates = [
+    combinedKey ? entityReviewLookup?.[combinedKey] : null,
+    registrationKey ? entityReviewLookup?.[registrationKey] : null,
+    nameKey ? entityReviewLookup?.[nameKey] : null
+  ].filter(Boolean).filter((match) => String(match.sourceCompanyId) !== String(currentCompanyId));
+
+  return candidates.find((match) => match.matchStrength === 'registration') || candidates[0] || null;
+}
+
+function normalizeEntityRegistrationKey(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '').trim();
+}
+
+function normalizeEntityNameKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\(pty\)|pty ltd|proprietary limited|limited|\bltd\b|\binc\b|\bcc\b/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
 }
 
 function buildAllTasks(companies, companyDetails) {
