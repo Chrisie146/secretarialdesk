@@ -34,6 +34,33 @@ import {
 import './styles.css';
 import { hasSupabaseConfig, supabase } from './supabaseClient';
 
+const STORAGE_KEYS = {
+  workspaceView: 'secretarialdesk.workspaceView',
+  selectedCompanyId: 'secretarialdesk.selectedCompanyId'
+};
+
+const VALID_WORKSPACE_VIEWS = ['dashboard', 'companies', 'deadlines', 'documents', 'filingPack', 'followUps', 'settings'];
+
+function readStoredValue(key) {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredValue(key, value) {
+  try {
+    if (value === null || value === undefined || value === '') {
+      window.localStorage.removeItem(key);
+    } else {
+      window.localStorage.setItem(key, String(value));
+    }
+  } catch {
+    // Ignore storage failures so private browsing or locked storage never breaks the app.
+  }
+}
+
 const initialCompanies = [
   {
     id: 1,
@@ -299,7 +326,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(hasSupabaseConfig);
   const [isSavingCompany, setIsSavingCompany] = useState(false);
   const [selectedCompany, setSelectedCompany] = useState(
-    initialCompanies.find((company) => String(company.id) === params.get('companyId')) || null
+    initialCompanies.find((company) => String(company.id) === (params.get('companyId') || readStoredValue(STORAGE_KEYS.selectedCompanyId))) || null
   );
   const [companyDetails, setCompanyDetails] = useState(initialCompanyDetails);
   const [practiceActivity, setPracticeActivity] = useState(buildRecentActivity(initialCompanies, initialCompanyDetails));
@@ -353,6 +380,7 @@ function App() {
         setPracticeActivity(buildRecentActivity(initialCompanies, initialCompanyDetails));
         setAnalysisJobs([]);
         setSelectedCompany(null);
+        writeStoredValue(STORAGE_KEYS.selectedCompanyId, null);
         setDatabaseFeatures(createDefaultDatabaseFeatures());
         setOperationNotice(null);
         setActiveOperation('');
@@ -1403,6 +1431,7 @@ function App() {
 
   const selectCompany = async (company) => {
     setSelectedCompany(company);
+    writeStoredValue(STORAGE_KEYS.selectedCompanyId, company?.id);
     setAppError('');
 
     if (!hasSupabaseConfig || !session) return;
@@ -1467,6 +1496,23 @@ function App() {
         mandatePrepared: mappedDocuments.some((document) => document.documentType === 'mandate_to_file')
       }
     }));
+  };
+
+  useEffect(() => {
+    if (view !== 'dashboard' || selectedCompany || !companies.length) return;
+    const storedCompanyId = readStoredValue(STORAGE_KEYS.selectedCompanyId);
+    if (!storedCompanyId) return;
+    const company = companies.find((item) => String(item.id) === String(storedCompanyId));
+    if (company) {
+      selectCompany(company);
+    } else {
+      writeStoredValue(STORAGE_KEYS.selectedCompanyId, null);
+    }
+  }, [companies, selectedCompany, view]);
+
+  const clearSelectedCompany = () => {
+    writeStoredValue(STORAGE_KEYS.selectedCompanyId, null);
+    setSelectedCompany(null);
   };
 
   const addDirector = async (director) => {
@@ -2924,7 +2970,7 @@ function App() {
       ) : view === 'landing' ? (
         <Landing onEnter={enterApp} />
       ) : (
-        <AppErrorBoundary onRecover={() => { setSelectedCompany(null); setAppError(null); }}>
+        <AppErrorBoundary onRecover={() => { clearSelectedCompany(); setAppError(null); }}>
           <Dashboard
             companies={companies}
             onAddCompany={() => setShowCompanyForm(true)}
@@ -2950,7 +2996,7 @@ function App() {
             onRetryDocumentAnalysis={retryDocumentAnalysis}
             onRemoveAnalysisJob={removeAnalysisJob}
             onOpenStoragePath={openStoragePath}
-            onClearCompany={() => setSelectedCompany(null)}
+            onClearCompany={clearSelectedCompany}
             onAddDirector={addDirector}
             onAddShareholder={addShareholder}
             onUpdateDirector={updateDirector}
@@ -4316,7 +4362,10 @@ function Dashboard({
   entityReviewLookup
 }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [workspaceView, setWorkspaceView] = useState('dashboard');
+  const [workspaceView, setWorkspaceView] = useState(() => {
+    const storedView = readStoredValue(STORAGE_KEYS.workspaceView);
+    return VALID_WORKSPACE_VIEWS.includes(storedView) ? storedView : 'dashboard';
+  });
   const [showNotifications, setShowNotifications] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
@@ -4334,6 +4383,10 @@ function Dashboard({
       dueThisWeek: taskStats.dueThisWeek
     };
   }, [companies, allTasks]);
+
+  useEffect(() => {
+    writeStoredValue(STORAGE_KEYS.workspaceView, workspaceView);
+  }, [workspaceView]);
 
   return (
     <div className={`min-h-screen overflow-x-hidden lg:grid ${sidebarCollapsed ? 'lg:grid-cols-[88px_minmax(0,1fr)]' : 'lg:grid-cols-[280px_minmax(0,1fr)]'}`}>
