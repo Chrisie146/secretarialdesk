@@ -3877,16 +3877,19 @@ function MiniStat({ label, value, tone }) {
 
 function AccessNotice({ title, detail }) {
   return (
-    <div className="mb-5 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-      <p className="font-semibold">{title}</p>
-      <p className="mt-1 leading-6">{detail}</p>
+    <div className="mb-5 flex gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 shadow-sm">
+      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+      <div>
+        <p className="font-semibold">{title}</p>
+        <p className="mt-1 leading-6">{detail}</p>
+      </div>
     </div>
   );
 }
 
 function OperationStatus({ label }) {
   return (
-    <div className="mb-5 flex items-center gap-3 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+    <div className="mb-5 flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 shadow-sm">
       <span className="h-4 w-4 animate-spin rounded-full border-2 border-blue-300 border-t-blue-800" />
       <span className="font-semibold">{label}</span>
     </div>
@@ -3896,12 +3899,17 @@ function OperationStatus({ label }) {
 function OperationNotice({ notice, onDismiss }) {
   const isSuccess = notice.type === 'success';
   return (
-    <div className={`mb-5 flex items-start justify-between gap-4 rounded-md border px-4 py-3 text-sm ${
+    <div className={`mb-5 flex items-start justify-between gap-4 rounded-lg border px-4 py-3 text-sm shadow-sm ${
       isSuccess ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-amber-200 bg-amber-50 text-amber-900'
     }`}>
-      <div>
-        <p className="font-semibold">{notice.title}</p>
-        {notice.detail && <p className="mt-1 leading-6">{notice.detail}</p>}
+      <div className="flex gap-3">
+        <span className={`mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full ${isSuccess ? 'bg-emerald-100' : 'bg-amber-100'}`}>
+          {isSuccess ? <Check className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
+        </span>
+        <div>
+          <p className="font-semibold">{notice.title}</p>
+          {notice.detail && <p className="mt-1 leading-6">{notice.detail}</p>}
+        </div>
       </div>
       <button type="button" onClick={onDismiss} className="rounded-md p-1 opacity-70 hover:bg-white/60 hover:opacity-100" aria-label="Dismiss notification">
         <X className="h-4 w-4" />
@@ -4398,7 +4406,7 @@ function CompanyDetail({
 
       <section className="grid min-w-0 gap-6 2xl:grid-cols-[minmax(0,1fr)_380px]">
         <div className="min-w-0 rounded-lg border border-ink/10 bg-white shadow-sm">
-          <div className="flex max-w-full gap-2 overflow-x-auto border-b border-ink/10 px-5 pt-4">
+          <div className="ui-scrollbar flex max-w-full gap-2 overflow-x-auto border-b border-ink/10 bg-paper/35 px-5 pt-4">
             <TabButton active={activeTab === 'shareholders'} onClick={() => setActiveTab('shareholders')} label="Shareholders" />
             <TabButton active={activeTab === 'ownershipMap'} onClick={() => setActiveTab('ownershipMap')} label="Ownership Map" />
             <TabButton active={activeTab === 'boRegister'} onClick={() => setActiveTab('boRegister')} label="BO Register" />
@@ -4786,7 +4794,12 @@ function FilingSubmissionBadge({ status }) {
 
 function TabButton({ active, onClick, label }) {
   return (
-    <button onClick={onClick} className={`border-b-2 px-4 py-3 text-sm font-semibold ${active ? 'border-forest text-forest' : 'border-transparent text-ink/55'}`}>
+    <button
+      onClick={onClick}
+      className={`shrink-0 rounded-t-md border-b-2 px-4 py-3 text-sm font-semibold transition ${
+        active ? 'border-forest bg-white text-forest shadow-[0_-1px_0_rgba(15,71,57,0.08)]' : 'border-transparent text-ink/55 hover:bg-white/65 hover:text-ink'
+      }`}
+    >
       {label}
     </button>
   );
@@ -5646,7 +5659,7 @@ function OwnershipMapPanel({ company, detail }) {
         </div>
       </div>
 
-      <div className="max-w-full overflow-x-auto rounded-md border border-ink/10 bg-white p-4">
+      <div className="ui-scrollbar max-w-full overflow-x-auto rounded-lg border border-ink/10 bg-paper/35 p-4 shadow-inner">
         {shareholders.length ? (
           <OwnershipMapSvg company={company} nodes={mapNodes} />
         ) : (
@@ -10181,19 +10194,20 @@ function NotificationsPanel({ notifications, onClose, onOpenCompany }) {
 
 function StatCard({ label, value, helper, alert }) {
   return (
-    <div className="min-w-0 rounded-lg border border-ink/10 bg-white p-5 shadow-sm">
-      <p className="text-sm text-ink/55">{label}</p>
-      <p className={`mt-3 break-words text-3xl font-semibold md:text-4xl ${alert ? 'text-red-700' : 'text-forest'}`}>{value}</p>
-      <p className="mt-2 text-sm text-ink/55">{helper}</p>
+    <div className="relative min-w-0 overflow-hidden rounded-lg border border-ink/10 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-ink/15 hover:shadow-panel">
+      <span className={`absolute inset-x-0 top-0 h-1 ${alert ? 'bg-red-700' : 'bg-forest'}`} />
+      <p className="text-xs font-semibold uppercase tracking-[0.1em] text-ink/45">{label}</p>
+      <p className={`mt-3 break-words text-3xl font-semibold leading-none md:text-4xl ${alert ? 'text-red-700' : 'text-forest'}`}>{value}</p>
+      <p className="mt-3 text-sm leading-5 text-ink/55">{helper}</p>
     </div>
   );
 }
 
 function CompanyTable({ companies, compact = false, onSelectCompany }) {
   return (
-    <div className="max-w-full overflow-x-auto">
+    <div className="ui-scrollbar max-w-full overflow-x-auto">
       <table className={`w-full text-left text-sm ${compact ? 'min-w-[560px]' : 'min-w-[680px]'}`}>
-        <thead className="border-b border-ink/10 bg-paper text-xs uppercase tracking-[0.08em] text-ink/50">
+        <thead className="border-b border-ink/10 bg-paper/80 text-xs uppercase tracking-[0.08em] text-ink/50">
           <tr>
             <th className="px-5 py-4 font-semibold">Company</th>
             <th className="px-5 py-4 font-semibold">Registration number</th>
@@ -10207,7 +10221,7 @@ function CompanyTable({ companies, compact = false, onSelectCompany }) {
             <tr
               key={company.id}
               onClick={() => onSelectCompany?.(company)}
-              className={`${onSelectCompany ? 'cursor-pointer' : ''} hover:bg-paper/80`}
+              className={`${onSelectCompany ? 'cursor-pointer' : ''} transition hover:bg-sage/45`}
             >
               <td className="px-5 py-4 font-medium">{company.name}</td>
               <td className="px-5 py-4 text-ink/65">{company.registrationNumber}</td>
@@ -10235,13 +10249,13 @@ function StatusBadge({ status }) {
     'Due Soon': 'bg-amber-50 text-amber-800 border-amber-200',
     'Action Required': 'bg-red-50 text-red-800 border-red-200'
   };
-  return <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${styles[status]}`}>{status}</span>;
+  return <span className={`inline-flex whitespace-nowrap rounded-full border px-3 py-1 text-xs font-semibold ${styles[status] || 'border-ink/10 bg-paper text-ink/65'}`}>{status || 'Not set'}</span>;
 }
 
 function Panel({ title, children }) {
   return (
     <div className="rounded-lg border border-ink/10 bg-white p-5 shadow-sm">
-      <h3 className="mb-4 text-lg font-semibold">{title}</h3>
+      <h3 className="mb-4 border-b border-ink/5 pb-3 text-base font-semibold md:text-lg">{title}</h3>
       {children}
     </div>
   );

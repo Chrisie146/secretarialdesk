@@ -15,11 +15,14 @@ body {
   margin: 0;
   min-width: 320px;
   background: #fbfaf7;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -27,11 +30,48 @@ button {
   transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
 }
 
+button:not(:disabled):active {
+  transform: translateY(1px);
+}
+
 button:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: 2px solid #0f4739;
   outline-offset: 2px;
+}
+
+::selection {
+  background: rgba(15, 71, 57, 0.16);
+  color: #0f4739;
+}
+
+@layer components {
+  .ui-scrollbar {
+    scrollbar-color: rgba(15, 71, 57, 0.34) rgba(32, 36, 42, 0.06);
+    scrollbar-width: thin;
+  }
+
+  .ui-scrollbar::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  .ui-scrollbar::-webkit-scrollbar-track {
+    background: rgba(32, 36, 42, 0.05);
+    border-radius: 999px;
+  }
+
+  .ui-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(15, 71, 57, 0.28);
+    border: 2px solid rgba(251, 250, 247, 0.9);
+    border-radius: 999px;
+  }
+
+  .ui-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(15, 71, 57, 0.42);
+  }
 }
 
 @media (prefers-reduced-motion: no-preference) {
