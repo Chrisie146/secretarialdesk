@@ -305,6 +305,7 @@ function App() {
   const [isSavingDetail, setIsSavingDetail] = useState(false);
   const [practiceMembers, setPracticeMembers] = useState([]);
   const [practiceInvitations, setPracticeInvitations] = useState([]);
+  const [analysisJobs, setAnalysisJobs] = useState([]);
   const [pendingInvitations, setPendingInvitations] = useState([]);
   const [currentUserRole, setCurrentUserRole] = useState(hasSupabaseConfig ? 'read_only' : 'owner');
   const [databaseFeatures, setDatabaseFeatures] = useState(createDefaultDatabaseFeatures());
@@ -349,6 +350,7 @@ function App() {
         setCompanies(initialCompanies);
         setCompanyDetails(initialCompanyDetails);
         setPracticeActivity(buildRecentActivity(initialCompanies, initialCompanyDetails));
+        setAnalysisJobs([]);
         setSelectedCompany(null);
         setDatabaseFeatures(createDefaultDatabaseFeatures());
         setOperationNotice(null);
@@ -520,6 +522,16 @@ function App() {
       setPracticeActivity((activityRows || []).map(mapPracticeActivityRow));
     }
 
+    const { data: analysisRows, error: analysisError } = await supabase
+      .from('document_analysis_jobs')
+      .select('id, practice_id, company_id, document_id, analysis_type, status, extracted_data, reviewed_data, confidence_summary, error_message, created_at, updated_at, documents(id, document_type, original_filename, file_path, status)')
+      .eq('practice_id', practiceRecord.id)
+      .order('created_at', { ascending: false });
+
+    if (!analysisError) {
+      setAnalysisJobs((analysisRows || []).map(mapAnalysisJobRow));
+    }
+
     const { data: companyRows, error: companiesError } = await supabase
       .from('company_profiles')
       .select('id, name, registration_number, company_type, compliance_status, next_due_date, incorporation_date, registered_address, shareholders(id)')
@@ -635,6 +647,363 @@ function App() {
     setShowCompanyForm(false);
     setView('dashboard');
     showSuccess('Company added', `${nextCompany.name} is now in your compliance workspace.`);
+  };
+
+  const uploadAnalysisDocuments = async ({ files, analysisType = 'company_onboarding' }) => {
+    if (!requirePermission(permissions.canEditCompany, 'Your role cannot analyze company documents.')) return;
+    const fileList = Array.from(files || []).filter(Boolean);
+    if (!fileList.length) {
+      setAppError('Upload at least one PDF document to analyze.');
+      return;
+    }
+
+    if (!hasSupabaseConfig || !session || !practice) {
+      const demoJobs = fileList.map((file, index) => {
+        const extractedData = createDemoCompanyExtraction(file.name, companies.length + index + 1);
+        return {
+          id: `analysis-${Date.now()}-${index}`,
+          practiceId: 'demo',
+          companyId: null,
+          documentId: `doc-${Date.now()}-${index}`,
+          analysisType,
+          status: 'review_required',
+          extractedData,
+          reviewedData: {},
+          confidenceSummary: extractedData.confidenceSummary || {},
+          errorMessage: '',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          document: {
+            id: `doc-${Date.now()}-${index}`,
+            documentType: 'cipc_filing_pack',
+            originalFilename: file.name,
+            filePath: null,
+            status: 'review_required'
+          }
+        };
+      });
+      setAnalysisJobs((current) => [...demoJobs, ...current]);
+      showSuccess('Demo extraction ready', `${demoJobs.length} document${demoJobs.length === 1 ? '' : 's'} prepared for review.`);
+      return;
+    }
+
+    setActiveOperation('Uploading documents for analysis...');
+    setAppError('');
+
+    for (const file of fileList) {
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '-');
+      const filePath = `${practice.id}/intake/${analysisType}/${Date.now()}-${safeName}`;
+      const { error: uploadError } = await supabase.storage
+        .from('company-documents')
+        .upload(filePath, file, { contentType: file.type || 'application/pdf', upsert: false });
+
+      if (uploadError) {
+        setActiveOperation('');
+        setAppError(uploadError.message);
+        return;
+      }
+
+      const { data: documentRow, error: documentError } = await supabase
+        .from('documents')
+        .insert({
+          practice_id: practice.id,
+          company_id: null,
+          document_type: 'cipc_filing_pack',
+          original_filename: file.name,
+          file_path: filePath,
+          status: 'queued',
+          created_by: session.user.id
+        })
+        .select('id, document_type, original_filename, file_path, status')
+        .single();
+
+      if (documentError) {
+        setActiveOperation('');
+        setAppError(documentError.message);
+        return;
+      }
+
+      const { data: jobRow, error: jobError } = await supabase
+        .from('document_analysis_jobs')
+        .insert({
+          practice_id: practice.id,
+          company_id: null,
+          document_id: documentRow.id,
+          analysis_type: analysisType,
+          status: 'queued',
+          created_by: session.user.id
+        })
+        .select('id, practice_id, company_id, document_id, analysis_type, status, extracted_data, reviewed_data, confidence_summary, error_message, created_at, updated_at, documents(id, document_type, original_filename, file_path, status)')
+        .single();
+
+      if (jobError) {
+        setActiveOperation('');
+        setAppError(jobError.message);
+        return;
+      }
+
+      const queuedJob = mapAnalysisJobRow(jobRow);
+      setAnalysisJobs((current) => [queuedJob, ...current]);
+      await runDocumentAnalysis(queuedJob.id, documentRow.id);
+    }
+
+    setActiveOperation('');
+    showSuccess('Analysis complete', 'Review extracted company information before applying it.');
+  };
+
+  const runDocumentAnalysis = async (jobId, documentId) => {
+    if (!hasSupabaseConfig || !session) return;
+    setActiveOperation('Analyzing document with AI...');
+
+    const { data, error } = await supabase.functions.invoke('analyze-document', {
+      body: { jobId, documentId }
+    });
+
+    if (error) {
+      setAppError(error.message || 'Document analysis failed.');
+    }
+
+    const { data: refreshedJob, error: refreshError } = await supabase
+      .from('document_analysis_jobs')
+      .select('id, practice_id, company_id, document_id, analysis_type, status, extracted_data, reviewed_data, confidence_summary, error_message, created_at, updated_at, documents(id, document_type, original_filename, file_path, status)')
+      .eq('id', jobId)
+      .single();
+
+    if (refreshError && data?.job) {
+      setAnalysisJobs((current) => current.map((job) => job.id === jobId ? { ...job, ...mapAnalysisJobRow(data.job) } : job));
+      return;
+    }
+
+    if (refreshError) {
+      setAppError(refreshError.message);
+      return;
+    }
+
+    setAnalysisJobs((current) => current.map((job) => job.id === jobId ? mapAnalysisJobRow(refreshedJob) : job));
+  };
+
+  const applyDocumentAnalysis = async ({ job, reviewedData, applyMode }) => {
+    if (!requirePermission(permissions.canEditCompany, 'Your role cannot apply analyzed company data.')) return;
+    const normalized = normalizeCompanyExtraction(reviewedData);
+    if (!normalized.company.name || !normalized.company.registrationNumber) {
+      setAppError('Company name and registration number are required before applying analysis.');
+      return;
+    }
+
+    if (applyMode === 'update' && reviewedData.matchedCompanyId) {
+      await applyAnalysisToExistingCompany(job, normalized, reviewedData.matchedCompanyId);
+    } else {
+      await createCompanyFromAnalysis(job, normalized);
+    }
+  };
+
+  const createCompanyFromAnalysis = async (job, reviewedData) => {
+    const companyInput = reviewedData.company;
+    const annualReturnDueDate = calculateNextAnnualReturnDue(companyInput.incorporationDate);
+    let nextCompany;
+
+    if (hasSupabaseConfig && session && practice) {
+      setActiveOperation('Creating company from reviewed analysis...');
+      const { data, error } = await supabase
+        .from('company_profiles')
+        .insert({
+          practice_id: practice.id,
+          name: companyInput.name,
+          registration_number: companyInput.registrationNumber,
+          company_type: companyInput.type || 'Pty Ltd',
+          incorporation_date: companyInput.incorporationDate || null,
+          registered_address: companyInput.registeredAddress || null,
+          next_due_date: annualReturnDueDate || null,
+          compliance_status: 'Action Required',
+          created_by: session.user.id
+        })
+        .select('id, name, registration_number, company_type, compliance_status, next_due_date, incorporation_date, registered_address')
+        .single();
+
+      if (error) {
+        setActiveOperation('');
+        setAppError(error.message);
+        return;
+      }
+
+      nextCompany = { ...mapCompanyRow(data), shareholders: 0 };
+      const directorRows = reviewedData.directors.filter((director) => director.fullName.trim()).map((director) => ({
+        company_id: data.id,
+        full_name: director.fullName.trim(),
+        id_number: director.idNumber || null,
+        appointment_date: director.appointmentDate || null
+      }));
+      const { data: insertedDirectors, error: directorsError } = directorRows.length
+        ? await supabase.from('directors').insert(directorRows).select('id, full_name, id_number, appointment_date')
+        : { data: [], error: null };
+
+      if (directorsError) {
+        setActiveOperation('');
+        setAppError(directorsError.message);
+        return;
+      }
+
+      await supabase.from('documents').update({ company_id: data.id, status: 'complete', extracted_data: reviewedData }).eq('id', job.documentId);
+      await supabase.from('document_analysis_jobs').update({
+        company_id: data.id,
+        status: 'applied',
+        reviewed_data: reviewedData,
+        updated_at: new Date().toISOString()
+      }).eq('id', job.id);
+
+      setCompanies((current) => [nextCompany, ...current]);
+      setCompanyDetails((current) => ({
+        ...current,
+        [data.id]: {
+          ...createEmptyCompanyDetail(),
+          directors: (insertedDirectors || []).map(mapDirectorRow),
+          documents: job.document ? [{ ...job.document, companyId: data.id, status: 'complete', extractedData: reviewedData }] : []
+        }
+      }));
+      updateAnalysisJobApplied(job.id, data.id, reviewedData);
+      logActivity({ companyId: data.id, companyName: data.name, action: 'company_created', subjectType: 'document_analysis', subjectId: job.id, details: { label: data.name, summary: 'Company created from reviewed AI document analysis', after: auditSnapshot(reviewedData) } });
+      setSelectedCompany(nextCompany);
+      setView('dashboard');
+      setActiveOperation('');
+      showSuccess('Company created', `${data.name} and ${directorRows.length} director${directorRows.length === 1 ? '' : 's'} were created from reviewed analysis.`);
+      return;
+    }
+
+    nextCompany = {
+      id: Date.now(),
+      ...companyInput,
+      status: 'Action Required',
+      nextDueDateRaw: annualReturnDueDate,
+      nextDueDate: formatCompanyDueDate(annualReturnDueDate),
+      shareholders: 0
+    };
+    setCompanies((current) => [nextCompany, ...current]);
+    setCompanyDetails((current) => ({
+      ...current,
+      [nextCompany.id]: {
+        ...createEmptyCompanyDetail(),
+        directors: reviewedData.directors.filter((director) => director.fullName.trim()).map((director, index) => ({ id: Date.now() + index + 1, ...director }))
+      }
+    }));
+    updateAnalysisJobApplied(job.id, nextCompany.id, reviewedData);
+    logActivity({ companyId: nextCompany.id, companyName: nextCompany.name, action: 'company_created', subjectType: 'document_analysis', subjectId: job.id, details: { label: nextCompany.name, summary: 'Company created from reviewed AI document analysis' } });
+    setSelectedCompany(nextCompany);
+    setView('dashboard');
+    showSuccess('Company created', `${nextCompany.name} was created from reviewed analysis.`);
+  };
+
+  const applyAnalysisToExistingCompany = async (job, reviewedData, companyId) => {
+    const company = companies.find((item) => String(item.id) === String(companyId));
+    if (!company) {
+      setAppError('Select a valid company match before applying.');
+      return;
+    }
+
+    const companyInput = reviewedData.company;
+    const annualReturnDueDate = calculateNextAnnualReturnDue(companyInput.incorporationDate);
+
+    if (hasSupabaseConfig && session) {
+      setActiveOperation('Updating matched company from reviewed analysis...');
+      const { data, error } = await supabase
+        .from('company_profiles')
+        .update({
+          name: companyInput.name,
+          registration_number: companyInput.registrationNumber,
+          company_type: companyInput.type || 'Pty Ltd',
+          incorporation_date: companyInput.incorporationDate || null,
+          registered_address: companyInput.registeredAddress || null,
+          next_due_date: annualReturnDueDate || null
+        })
+        .eq('id', companyId)
+        .select('id, name, registration_number, company_type, compliance_status, next_due_date, incorporation_date, registered_address')
+        .single();
+
+      if (error) {
+        setActiveOperation('');
+        setAppError(error.message);
+        return;
+      }
+
+      const directorRows = reviewedData.directors.filter((director) => director.fullName.trim()).map((director) => ({
+        company_id: companyId,
+        full_name: director.fullName.trim(),
+        id_number: director.idNumber || null,
+        appointment_date: director.appointmentDate || null
+      }));
+      const { data: insertedDirectors, error: directorsError } = directorRows.length
+        ? await supabase.from('directors').insert(directorRows).select('id, full_name, id_number, appointment_date')
+        : { data: [], error: null };
+
+      if (directorsError) {
+        setActiveOperation('');
+        setAppError(directorsError.message);
+        return;
+      }
+
+      await supabase.from('documents').update({ company_id: companyId, status: 'complete', extracted_data: reviewedData }).eq('id', job.documentId);
+      await supabase.from('document_analysis_jobs').update({
+        company_id: companyId,
+        status: 'applied',
+        reviewed_data: reviewedData,
+        updated_at: new Date().toISOString()
+      }).eq('id', job.id);
+
+      const updatedCompany = { ...mapCompanyRow(data), shareholders: company.shareholders || 0 };
+      setCompanies((current) => current.map((item) => String(item.id) === String(companyId) ? updatedCompany : item));
+      setCompanyDetails((current) => {
+        const existing = current[companyId] || createEmptyCompanyDetail();
+        return {
+          ...current,
+          [companyId]: {
+            ...existing,
+            directors: [...(insertedDirectors || []).map(mapDirectorRow), ...(existing.directors || [])],
+            documents: job.document ? [{ ...job.document, companyId, status: 'complete', extractedData: reviewedData }, ...(existing.documents || [])] : existing.documents
+          }
+        };
+      });
+      updateAnalysisJobApplied(job.id, companyId, reviewedData);
+      logActivity({ companyId, companyName: data.name, action: 'company_updated', subjectType: 'document_analysis', subjectId: job.id, details: { label: data.name, summary: 'Company updated from reviewed AI document analysis', after: auditSnapshot(reviewedData) } });
+      setSelectedCompany(updatedCompany);
+      setView('dashboard');
+      setActiveOperation('');
+      showSuccess('Company updated', `${data.name} was updated from reviewed analysis.`);
+      return;
+    }
+
+    const updatedCompany = {
+      ...company,
+      ...companyInput,
+      nextDueDateRaw: annualReturnDueDate,
+      nextDueDate: formatCompanyDueDate(annualReturnDueDate)
+    };
+    setCompanies((current) => current.map((item) => String(item.id) === String(companyId) ? updatedCompany : item));
+    setCompanyDetails((current) => {
+      const existing = current[companyId] || createEmptyCompanyDetail();
+      return {
+        ...current,
+        [companyId]: {
+          ...existing,
+          directors: [
+            ...reviewedData.directors.filter((director) => director.fullName.trim()).map((director, index) => ({ id: Date.now() + index, ...director })),
+            ...(existing.directors || [])
+          ]
+        }
+      };
+    });
+    updateAnalysisJobApplied(job.id, companyId, reviewedData);
+    setSelectedCompany(updatedCompany);
+    setView('dashboard');
+    showSuccess('Company updated', `${updatedCompany.name} was updated from reviewed analysis.`);
+  };
+
+  const updateAnalysisJobApplied = (jobId, companyId, reviewedData) => {
+    setAnalysisJobs((current) => current.map((job) => job.id === jobId ? {
+      ...job,
+      companyId,
+      status: 'applied',
+      reviewedData,
+      updatedAt: new Date().toISOString()
+    } : job));
   };
 
   const importCompanies = async (rows) => {
@@ -2477,6 +2846,9 @@ function App() {
             companyDetail={selectedCompany ? companyDetails[selectedCompany.id] || createEmptyCompanyDetail() : null}
             onSelectCompany={selectCompany}
             onImportCompanies={importCompanies}
+            analysisJobs={analysisJobs}
+            onUploadAnalysisDocuments={uploadAnalysisDocuments}
+            onApplyDocumentAnalysis={applyDocumentAnalysis}
             onClearCompany={() => setSelectedCompany(null)}
             onAddDirector={addDirector}
             onAddShareholder={addShareholder}
@@ -2664,7 +3036,27 @@ function mapDocumentRow(row) {
     documentType: row.document_type,
     originalFilename: row.original_filename || documentLabel(row.document_type),
     filePath: row.file_path || null,
-    status: row.status || 'complete'
+    status: row.status || 'complete',
+    extractedData: row.extracted_data || {}
+  };
+}
+
+function mapAnalysisJobRow(row) {
+  const document = Array.isArray(row.documents) ? row.documents[0] : row.documents;
+  return {
+    id: row.id,
+    practiceId: row.practice_id,
+    companyId: row.company_id || null,
+    documentId: row.document_id,
+    analysisType: row.analysis_type || 'company_onboarding',
+    status: row.status || 'queued',
+    extractedData: row.extracted_data || {},
+    reviewedData: row.reviewed_data || {},
+    confidenceSummary: row.confidence_summary || {},
+    errorMessage: row.error_message || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || '',
+    document: document ? mapDocumentRow(document) : null
   };
 }
 
@@ -3770,6 +4162,9 @@ function Dashboard({
   companyDetail,
   onSelectCompany,
   onImportCompanies,
+  analysisJobs,
+  onUploadAnalysisDocuments,
+  onApplyDocumentAnalysis,
   onClearCompany,
   onAddDirector,
   onAddShareholder,
@@ -4008,10 +4403,13 @@ function Dashboard({
               ) : workspaceView === 'filingPack' ? (
                 <FilingPackWorkspace companies={companies} onSelectCompany={onSelectCompany} />
               ) : workspaceView === 'documents' ? (
-                <PlaceholderWorkspace
-                  title="AI Document Analyzer"
-                  detail="AI extraction is paused for now. Use company detail pages to upload and record PDFs without AI."
-                  action="Open a company to manage documents"
+                <DocumentAnalyzerWorkspace
+                  companies={companies}
+                  analysisJobs={analysisJobs}
+                  permissions={permissions}
+                  isSaving={isSavingDetail || isSavingCompany}
+                  onUploadAnalysisDocuments={onUploadAnalysisDocuments}
+                  onApplyDocumentAnalysis={onApplyDocumentAnalysis}
                 />
               ) : workspaceView === 'followUps' ? (
                 <FollowUpsWorkspace tasks={allTasks} onSelectCompany={onSelectCompany} />
@@ -4212,6 +4610,7 @@ function CompanyDetail({
   databaseFeatures
 }) {
   const [activeTab, setActiveTab] = useState('shareholders');
+  useEffect(() => { window.scrollTo({ top: 0, behavior: 'smooth' }); }, [activeTab]);
   const boAssessment = assessBeneficialOwnership(detail.shareholders, detail.beneficialOwners || [], detail.trustReviews || [], detail.entityOwnershipReviews || []);
   const readiness = getReadinessChecklist(detail);
   const validation = getComplianceValidation(company, detail);
@@ -4270,6 +4669,7 @@ function CompanyDetail({
                 isSaving={isSaving || !permissions.canEditBoRecords}
                 entityReviewLookup={entityReviewLookup}
                 currentCompanyId={company.id}
+                onSwitchTab={setActiveTab}
               />
             ) : activeTab === 'directors' ? (
               <DirectorsPanel directors={detail.directors} directorChanges={detail.directorChanges || []} contacts={detail.contacts || []} onAddDirector={onAddDirector} onUpdateDirector={onUpdateDirector} onDeleteDirector={onDeleteDirector} onSaveDirectorChange={onSaveDirectorChange} onUpdateDirectorChangeStatus={onUpdateDirectorChangeStatus} onAddTask={onAddTask} isSaving={isSaving || !permissions.canEditCompany} directorChangeFeature={databaseFeatures?.directorChanges} />
@@ -4486,7 +4886,7 @@ function DocumentUploadPanel({ detail, onAddDocument, onDeleteDocument, onOpenSt
 
       <label className="mt-4 flex items-center justify-between gap-4 rounded-md border border-ink/10 bg-white px-3 py-3 text-sm">
         <span>Mandate to File prepared</span>
-        <input type="checkbox" checked={detail.mandatePrepared} onChange={onToggleMandate} className="h-4 w-4 accent-forest" />
+        <input type="checkbox" checked={detail.mandatePrepared} onChange={onToggleMandate} className="h-4 w-4 rounded border-ink/20 text-forest accent-forest" />
       </label>
     </div>
   );
@@ -4789,6 +5189,7 @@ function ShareholdersPanel({ shareholders, shareTransactions, contacts, onAddSha
   const [form, setForm] = useState({ shareholderType: 'natural_person', name: '', idNumber: '', ownershipPercentage: '' });
   const [editingId, setEditingId] = useState(null);
   const [bulkText, setBulkText] = useState('');
+  const formRef = React.useRef(null);
   const canSubmit = form.name.trim() && Number(form.ownershipPercentage) >= 0;
   const bulkRows = useMemo(() => parseShareholderBulkRows(bulkText), [bulkText]);
   const validBulkRows = bulkRows.filter((row) => row.valid);
@@ -4852,15 +5253,20 @@ function ShareholdersPanel({ shareholders, shareTransactions, contacts, onAddSha
             ))}
             {shareholders.length === 0 && (
               <tr>
-                <td className="px-4 py-8 text-ink/55" colSpan="6">No shareholders captured yet.</td>
+                <td className="px-4 py-8 text-center" colSpan="6">
+                  <p className="text-ink/55">No shareholders captured yet.</p>
+                  <button type="button" onClick={() => formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })} className="mt-2 text-sm font-semibold text-forest hover:underline">
+                    Add the first shareholder above
+                  </button>
+                </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
 
-      <form onSubmit={submit} className="rounded-md border border-ink/10 bg-paper p-4">
-        <h3 className="font-semibold">{editingId ? 'Edit shareholder' : 'Add shareholder'}</h3>
+      <form ref={formRef} onSubmit={submit} className="rounded-md border border-ink/10 bg-paper p-4">
+        <h4 className="font-semibold">{editingId ? 'Edit shareholder' : 'Add shareholder'}</h4>
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
           <label className="block">
             <span className="mb-2 block text-sm font-medium">Shareholder type</span>
@@ -4889,7 +5295,7 @@ function ShareholdersPanel({ shareholders, shareTransactions, contacts, onAddSha
       <div className="rounded-md border border-ink/10 bg-white p-4">
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div>
-            <h3 className="font-semibold">Bulk paste shareholders</h3>
+            <h4 className="font-semibold">Bulk paste shareholders</h4>
             <p className="mt-1 text-sm leading-6 text-ink/55">
               Paste rows from Excel or CSV using: type, name, ID/registration number, ownership %. Header row is optional.
             </p>
@@ -5001,7 +5407,7 @@ function ShareRegisterMaintenancePanel({ shareholders, shareTransactions, contac
   return (
     <section className="rounded-md border border-ink/10 bg-white">
       <div className="border-b border-ink/10 px-4 py-3">
-        <h3 className="font-semibold">Share register maintenance</h3>
+        <h4 className="font-semibold">Share register maintenance</h4>
         <p className="mt-1 text-sm leading-6 text-ink/55">Record share movements before updating the shareholder register and BO calculations.</p>
       </div>
       <div className="border-b border-ink/10 bg-sage/70 px-4 py-3 text-sm leading-6 text-forest">
@@ -5112,7 +5518,7 @@ function ShareRegisterMaintenancePanel({ shareholders, shareTransactions, contac
           <Field type="date" label="Transaction date" value={form.transactionDate} onChange={(transactionDate) => setForm({ ...form, transactionDate })} />
           <Field label="Consideration" value={form.consideration} onChange={(consideration) => setForm({ ...form, consideration })} placeholder="e.g. R100 or nil" />
           <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={form.supportingDocsReceived} onChange={(event) => setForm({ ...form, supportingDocsReceived: event.target.checked })} className="h-4 w-4 accent-forest" />
+            <input type="checkbox" checked={form.supportingDocsReceived} onChange={(event) => setForm({ ...form, supportingDocsReceived: event.target.checked })} className="h-4 w-4 rounded border-ink/20 text-forest accent-forest" />
             Signed transfer/resolution docs received
           </label>
           <div className="lg:col-span-3">
@@ -5131,6 +5537,7 @@ function DirectorsPanel({ directors, directorChanges, contacts, onAddDirector, o
   const [form, setForm] = useState({ fullName: '', idNumber: '', appointmentDate: '' });
   const [editingId, setEditingId] = useState(null);
   const canSubmit = form.fullName.trim();
+  const formRef = React.useRef(null);
 
   const submit = (event) => {
     event.preventDefault();
@@ -5181,15 +5588,20 @@ function DirectorsPanel({ directors, directorChanges, contacts, onAddDirector, o
             ))}
             {directors.length === 0 && (
               <tr>
-                <td className="px-4 py-8 text-ink/55" colSpan="4">No directors captured yet.</td>
+                <td className="px-4 py-8 text-center" colSpan="4">
+                  <p className="text-ink/55">No directors captured yet.</p>
+                  <button type="button" onClick={() => formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })} className="mt-2 text-sm font-semibold text-forest hover:underline">
+                    Add the first director above
+                  </button>
+                </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
 
-      <form onSubmit={submit} className="rounded-md border border-ink/10 bg-paper p-4">
-        <h3 className="font-semibold">{editingId ? 'Edit director' : 'Add director'}</h3>
+      <form ref={formRef} onSubmit={submit} className="rounded-md border border-ink/10 bg-paper p-4">
+        <h4 className="font-semibold">{editingId ? 'Edit director' : 'Add director'}</h4>
         <div className="mt-4 grid gap-4 lg:grid-cols-3">
           <Field label="Full name" value={form.fullName} onChange={(fullName) => setForm({ ...form, fullName })} placeholder="e.g. Thabo Mokoena" />
           <Field label="ID number" value={form.idNumber} onChange={(idNumber) => setForm({ ...form, idNumber })} placeholder="SA ID or passport" />
@@ -5371,11 +5783,11 @@ function DirectorChangeFilingPanel({ directors, directorChanges, contacts, onSav
           <Field label="CIPC reference" value={form.cipcReference} onChange={(cipcReference) => setForm({ ...form, cipcReference })} placeholder="Optional before submission" />
           <div className="grid gap-2">
             <label className="flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={form.boardResolutionReceived} onChange={(event) => setForm({ ...form, boardResolutionReceived: event.target.checked })} className="h-4 w-4 accent-forest" />
+              <input type="checkbox" checked={form.boardResolutionReceived} onChange={(event) => setForm({ ...form, boardResolutionReceived: event.target.checked })} className="h-4 w-4 rounded border-ink/20 text-forest accent-forest" />
               Board resolution received
             </label>
             <label className="flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={form.signedCor39Received} onChange={(event) => setForm({ ...form, signedCor39Received: event.target.checked })} className="h-4 w-4 accent-forest" />
+              <input type="checkbox" checked={form.signedCor39Received} onChange={(event) => setForm({ ...form, signedCor39Received: event.target.checked })} className="h-4 w-4 rounded border-ink/20 text-forest accent-forest" />
               Signed CoR39 received
             </label>
           </div>
@@ -5593,7 +6005,8 @@ function BoRegisterPanel({
   onCreateBeneficialOwnersFromEntityReview,
   isSaving,
   entityReviewLookup,
-  currentCompanyId
+  currentCompanyId,
+  onSwitchTab
 }) {
   const emptyManualBo = { fullName: '', idNumber: '', ownershipPercentage: '', controlBasis: 'Indirect ownership', notes: '' };
   const [manualBo, setManualBo] = useState(emptyManualBo);
@@ -5714,7 +6127,14 @@ function BoRegisterPanel({
             ))}
             {rows.length === 0 && (
               <tr>
-                <td className="px-4 py-8 text-ink/55" colSpan="7">No shareholders captured yet.</td>
+                <td className="px-4 py-8 text-center" colSpan="7">
+                  <p className="text-ink/55">No shareholders captured yet.</p>
+                  {onSwitchTab && (
+                    <button type="button" onClick={() => onSwitchTab('shareholders')} className="mt-2 text-sm font-semibold text-forest hover:underline">
+                      Go to Shareholders tab to add them
+                    </button>
+                  )}
+                </td>
               </tr>
             )}
           </tbody>
@@ -5825,10 +6245,17 @@ function TrustReviewCard({ trust, review, onSaveTrustReview, onCreateBeneficialO
   const [peopleRows, setPeopleRows] = useState(() => trustReviewRows(review));
   const [showPaste, setShowPaste] = useState(false);
   const [pasteText, setPasteText] = useState('');
+  const [savedFlash, setSavedFlash] = useState(false);
+  const prevReviewedAt = React.useRef(review?.reviewedAt);
 
   useEffect(() => {
     setForm({ notes: review?.notes || '' });
     setPeopleRows(trustReviewRows(review));
+    if (review?.reviewedAt && review.reviewedAt !== prevReviewedAt.current) {
+      setSavedFlash(true);
+      prevReviewedAt.current = review.reviewedAt;
+      window.setTimeout(() => setSavedFlash(false), 2000);
+    }
   }, [review?.id, review?.reviewedAt]);
 
   const people = peopleRows.map(cleanTrustPersonRow).filter((person) => person.fullName.trim());
@@ -5946,6 +6373,7 @@ function TrustReviewCard({ trust, review, onSaveTrustReview, onCreateBeneficialO
         <button disabled={isSaving} className="rounded-md bg-forest px-4 py-3 text-sm font-semibold text-white disabled:bg-ink/30">
           {isSaving ? 'Saving...' : 'Save trust review'}
         </button>
+        {savedFlash && <span className="inline-flex items-center rounded-md bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-700">Saved ✓</span>}
         <button
           type="button"
           onClick={() => review?.id && onCreateBeneficialOwnersFromTrustReview(review.id)}
@@ -5998,10 +6426,17 @@ function EntityOwnershipReviewCard({ entity, review, suggestion, onSaveEntityOwn
   const [ownerRows, setOwnerRows] = useState(() => entityOwnershipReviewRows(review));
   const [pasteText, setPasteText] = useState('');
   const [showPaste, setShowPaste] = useState(false);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const prevReviewedAt = React.useRef(review?.reviewedAt);
 
   useEffect(() => {
     setForm(entityOwnershipReviewToForm(review));
     setOwnerRows(entityOwnershipReviewRows(review));
+    if (review?.reviewedAt && review.reviewedAt !== prevReviewedAt.current) {
+      setSavedFlash(true);
+      prevReviewedAt.current = review.reviewedAt;
+      window.setTimeout(() => setSavedFlash(false), 2000);
+    }
   }, [review?.id, review?.reviewedAt]);
 
   const owners = ownerRows
@@ -6170,6 +6605,7 @@ function EntityOwnershipReviewCard({ entity, review, suggestion, onSaveEntityOwn
         <button disabled={isSaving} className="rounded-md bg-forest px-4 py-3 text-sm font-semibold text-white disabled:bg-ink/30">
           {isSaving ? 'Saving...' : 'Save look-through'}
         </button>
+        {savedFlash && <span className="inline-flex items-center rounded-md bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-700">Saved ✓</span>}
         <button
           type="button"
           onClick={() => review?.id && onCreateBeneficialOwnersFromEntityReview(review.id)}
@@ -8089,8 +8525,68 @@ function documentLabel(documentType) {
     share_register: 'Share Register',
     moi: 'MoI',
     trust_deed: 'Trust Deed',
-    mandate_to_file: 'Mandate to File'
+    mandate_to_file: 'Mandate to File',
+    cipc_filing_pack: 'CIPC / Company Document'
   }[documentType] || documentType;
+}
+
+function normalizeCompanyExtraction(data = {}) {
+  const company = data.company || {};
+  return {
+    company: {
+      name: String(company.name || '').trim(),
+      registrationNumber: String(company.registrationNumber || company.registration_number || '').trim(),
+      type: normalizeCompanyType(company.type || company.companyType || company.company_type || 'Pty Ltd'),
+      incorporationDate: normalizeImportDate(company.incorporationDate || company.incorporation_date || '') || '',
+      registeredAddress: String(company.registeredAddress || company.registered_address || '').trim()
+    },
+    directors: (Array.isArray(data.directors) ? data.directors : []).map((director) => ({
+      fullName: String(director.fullName || director.full_name || director.name || '').trim(),
+      idNumber: String(director.idNumber || director.id_number || director.identityNumber || '').trim(),
+      appointmentDate: normalizeImportDate(director.appointmentDate || director.appointment_date || '') || '',
+      sourceNote: String(director.sourceNote || director.source_note || director.notes || '').trim()
+    })),
+    warnings: Array.isArray(data.warnings) ? data.warnings.map(String) : [],
+    sourceNotes: Array.isArray(data.sourceNotes) ? data.sourceNotes.map(String) : [],
+    confidenceSummary: data.confidenceSummary || data.confidence_summary || {}
+  };
+}
+
+function normalizeCompanyType(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (text.includes('public')) return 'Public Company';
+  if (text.includes('non-profit') || text.includes('non profit') || text.includes('npc')) return 'Non-Profit Company';
+  if (text.includes('personal liability') || text.includes('inc')) return 'Personal Liability Company';
+  return 'Pty Ltd';
+}
+
+function createDemoCompanyExtraction(filename, index = 1) {
+  const baseName = filename
+    .replace(/\.[^.]+$/, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b(cipc|cor|document|company|registration|certificate)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const name = baseName ? titleCase(`${baseName} Pty Ltd`) : `Example Company ${index} Pty Ltd`;
+  return normalizeCompanyExtraction({
+    company: {
+      name,
+      registrationNumber: `202${index}/12345${index}/07`,
+      type: 'Pty Ltd',
+      incorporationDate: todayIsoDate(),
+      registeredAddress: ''
+    },
+    directors: [
+      { fullName: 'Review Required Director', idNumber: '', appointmentDate: '', sourceNote: 'Demo extraction placeholder. Replace with source document data.' }
+    ],
+    warnings: ['Demo mode uses sample extracted data. Configure Supabase and Gemini for real PDF analysis.'],
+    sourceNotes: [`Source file: ${filename}`],
+    confidenceSummary: { company: 'low', directors: 'low', notes: 'Demo extraction only.' }
+  });
+}
+
+function titleCase(value) {
+  return String(value || '').toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function filingSubmissionLabel(status) {
@@ -9259,6 +9755,288 @@ function DashboardHome({ stats, companies, allTasks, recentActivity, onAddCompan
       </section>
     </>
   );
+}
+
+function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSaving, onUploadAnalysisDocuments, onApplyDocumentAnalysis }) {
+  const [files, setFiles] = useState([]);
+  const [selectedJobId, setSelectedJobId] = useState(analysisJobs[0]?.id || '');
+  const selectedJob = analysisJobs.find((job) => job.id === selectedJobId) || analysisJobs[0] || null;
+
+  useEffect(() => {
+    if (!selectedJobId && analysisJobs[0]?.id) setSelectedJobId(analysisJobs[0].id);
+  }, [analysisJobs, selectedJobId]);
+
+  const submit = (event) => {
+    event.preventDefault();
+    onUploadAnalysisDocuments({ files, analysisType: 'company_onboarding' });
+    setFiles([]);
+    event.currentTarget.reset();
+  };
+
+  return (
+    <div className="space-y-6">
+      <section className="rounded-lg border border-ink/10 bg-white shadow-sm">
+        <div className="border-b border-ink/10 px-5 py-5">
+          <h3 className="text-xl font-semibold">AI Document Analyzer</h3>
+          <p className="mt-1 text-sm leading-6 text-ink/60">
+            Upload CIPC company documents, review extracted company and director data, then apply it to your workspace.
+          </p>
+        </div>
+        {!permissions.canEditCompany && (
+          <div className="px-5 pt-5">
+            <AccessNotice title="Analyzer disabled" detail="Your role can view records but cannot upload or apply analyzed company documents." />
+          </div>
+        )}
+        <div className="grid gap-5 p-5 xl:grid-cols-[360px_minmax(0,1fr)]">
+          <div className="space-y-4">
+            <form onSubmit={submit} className="rounded-md border border-ink/10 bg-paper p-4">
+              <p className="text-sm font-semibold">1. Upload company documents</p>
+              <p className="mt-1 text-sm leading-6 text-ink/55">Use company registration certificates, CoR documents or CIPC disclosure PDFs.</p>
+              <label className="mt-4 block">
+                <span className="mb-2 block text-sm font-medium">PDF files</span>
+                <input
+                  type="file"
+                  accept="application/pdf,.pdf"
+                  multiple
+                  onChange={(event) => setFiles(Array.from(event.target.files || []))}
+                  className="block w-full rounded-md border border-ink/15 bg-white px-3 py-2 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-sage file:px-3 file:py-2 file:text-sm file:font-semibold file:text-forest"
+                />
+              </label>
+              {files.length > 0 && (
+                <div className="mt-3 rounded-md bg-white p-3 text-xs leading-5 text-ink/60">
+                  {files.map((file) => <p key={`${file.name}-${file.size}`} className="truncate">{file.name}</p>)}
+                </div>
+              )}
+              <button disabled={isSaving || !permissions.canEditCompany || files.length === 0} className="mt-4 w-full rounded-md bg-forest px-4 py-3 text-sm font-semibold text-white disabled:bg-ink/30">
+                {isSaving ? 'Processing...' : 'Analyze documents'}
+              </button>
+            </form>
+
+            <div className="rounded-md border border-ink/10 bg-white">
+              <div className="border-b border-ink/10 px-4 py-3">
+                <p className="text-sm font-semibold">2. Intake queue</p>
+              </div>
+              <div className="max-h-[420px] space-y-2 overflow-y-auto p-3">
+                {analysisJobs.map((job) => (
+                  <button
+                    key={job.id}
+                    type="button"
+                    onClick={() => setSelectedJobId(job.id)}
+                    className={`w-full rounded-md border p-3 text-left text-sm ${selectedJob?.id === job.id ? 'border-forest bg-sage/70' : 'border-ink/10 hover:bg-paper'}`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <span className="min-w-0">
+                        <span className="block truncate font-semibold">{job.document?.originalFilename || 'Company document'}</span>
+                        <span className="mt-1 block text-xs text-ink/55">{analysisTypeLabel(job.analysisType)}</span>
+                      </span>
+                      <AnalysisStatusBadge status={job.status} />
+                    </div>
+                  </button>
+                ))}
+                {analysisJobs.length === 0 && (
+                  <div className="rounded-md border border-ink/10 bg-paper p-4 text-sm leading-6 text-ink/55">
+                    No documents analyzed yet. Upload a CIPC company document to start.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <DocumentAnalysisReview
+            job={selectedJob}
+            companies={companies}
+            permissions={permissions}
+            isSaving={isSaving}
+            onApplyDocumentAnalysis={onApplyDocumentAnalysis}
+          />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApplyDocumentAnalysis }) {
+  const extracted = normalizeCompanyExtraction(job?.reviewedData && Object.keys(job.reviewedData).length ? job.reviewedData : job?.extractedData || {});
+  const suggestedMatch = companies.find((company) =>
+    normalizeCompanyRegistrationNumber(company.registrationNumber).toLowerCase() ===
+    normalizeCompanyRegistrationNumber(extracted.company.registrationNumber).toLowerCase()
+  );
+  const [form, setForm] = useState(extracted);
+  const [applyMode, setApplyMode] = useState(suggestedMatch ? 'update' : 'create');
+
+  useEffect(() => {
+    const nextExtracted = normalizeCompanyExtraction(job?.reviewedData && Object.keys(job.reviewedData).length ? job.reviewedData : job?.extractedData || {});
+    const nextMatch = companies.find((company) =>
+      normalizeCompanyRegistrationNumber(company.registrationNumber).toLowerCase() ===
+      normalizeCompanyRegistrationNumber(nextExtracted.company.registrationNumber).toLowerCase()
+    );
+    setForm(nextExtracted);
+    setApplyMode(nextMatch ? 'update' : 'create');
+  }, [job?.id]);
+
+  if (!job) {
+    return (
+      <div className="grid min-h-[360px] place-items-center rounded-md border border-ink/10 bg-paper text-center">
+        <div>
+          <BrainCircuit className="mx-auto h-8 w-8 text-forest" />
+          <p className="mt-3 font-semibold">No document selected</p>
+          <p className="mt-1 text-sm text-ink/55">Upload a PDF to review extracted company data.</p>
+        </div>
+      </div>
+    );
+  }
+
+  const canApply = permissions.canEditCompany && job.status === 'review_required' && form.company.name.trim() && form.company.registrationNumber.trim();
+  const reviewedData = {
+    ...form,
+    matchedCompanyId: suggestedMatch?.id || null
+  };
+
+  return (
+    <div className="rounded-md border border-ink/10 bg-white">
+      <div className="border-b border-ink/10 px-5 py-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h4 className="font-semibold">3. Review extracted company data</h4>
+            <p className="mt-1 text-sm text-ink/55">{job.document?.originalFilename || 'Uploaded document'}</p>
+          </div>
+          <AnalysisStatusBadge status={job.status} />
+        </div>
+      </div>
+
+      {job.status === 'failed' && (
+        <div className="border-b border-red-200 bg-red-50 px-5 py-4 text-sm leading-6 text-red-800">
+          <p className="font-semibold">Analysis failed</p>
+          <p className="mt-1">{job.errorMessage || 'The document could not be analyzed.'}</p>
+        </div>
+      )}
+
+      {job.status !== 'review_required' && job.status !== 'applied' && job.status !== 'failed' && (
+        <div className="border-b border-blue-200 bg-blue-50 px-5 py-4 text-sm leading-6 text-blue-900">
+          This document is still being processed. Refresh the page if the status does not update after the Edge Function completes.
+        </div>
+      )}
+
+      <div className="space-y-5 p-5">
+        {suggestedMatch && (
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+            <p className="font-semibold">Possible existing company match</p>
+            <p className="mt-1">{suggestedMatch.name} ({suggestedMatch.registrationNumber}) already exists. Choose whether to update it or create a separate record.</p>
+            <div className="mt-3 flex flex-wrap gap-3">
+              <label className="flex items-center gap-2">
+                <input type="radio" checked={applyMode === 'update'} onChange={() => setApplyMode('update')} className="accent-forest" />
+                Update matched company
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="radio" checked={applyMode === 'create'} onChange={() => setApplyMode('create')} className="accent-forest" />
+                Create new company
+              </label>
+            </div>
+          </div>
+        )}
+
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Field label="Company name" value={form.company.name} onChange={(name) => setForm({ ...form, company: { ...form.company, name } })} />
+          <Field label="Registration number" value={form.company.registrationNumber} onChange={(registrationNumber) => setForm({ ...form, company: { ...form.company, registrationNumber } })} />
+          <label className="block">
+            <span className="mb-2 block text-sm font-medium">Company type</span>
+            <select value={form.company.type} onChange={(event) => setForm({ ...form, company: { ...form.company, type: event.target.value } })} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm">
+              <option>Pty Ltd</option>
+              <option>Public Company</option>
+              <option>Non-Profit Company</option>
+              <option>Personal Liability Company</option>
+            </select>
+          </label>
+          <Field type="date" label="Incorporation date" value={form.company.incorporationDate} onChange={(incorporationDate) => setForm({ ...form, company: { ...form.company, incorporationDate } })} />
+          <div className="lg:col-span-2">
+            <Field label="Registered office address" value={form.company.registeredAddress} onChange={(registeredAddress) => setForm({ ...form, company: { ...form.company, registeredAddress } })} placeholder="Registered office address" />
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between gap-3">
+            <h4 className="font-semibold">Directors</h4>
+            <button type="button" onClick={() => setForm({ ...form, directors: [...form.directors, { fullName: '', idNumber: '', appointmentDate: '', sourceNote: '' }] })} className="rounded-md border border-gold/60 px-3 py-2 text-xs font-semibold text-gold hover:bg-gold/5">
+              Add director
+            </button>
+          </div>
+          <div className="mt-3 space-y-3">
+            {form.directors.map((director, index) => (
+              <div key={index} className="rounded-md border border-ink/10 bg-paper p-3">
+                <div className="grid gap-3 lg:grid-cols-3">
+                  <Field label="Full name" value={director.fullName} onChange={(fullName) => updateDirectorExtraction(form, setForm, index, { fullName })} />
+                  <Field label="ID / passport" value={director.idNumber} onChange={(idNumber) => updateDirectorExtraction(form, setForm, index, { idNumber })} />
+                  <Field type="date" label="Appointment date" value={director.appointmentDate} onChange={(appointmentDate) => updateDirectorExtraction(form, setForm, index, { appointmentDate })} />
+                  <div className="lg:col-span-3">
+                    <Field label="Source note" value={director.sourceNote} onChange={(sourceNote) => updateDirectorExtraction(form, setForm, index, { sourceNote })} placeholder="Clause, page, or uncertainty note" />
+                  </div>
+                </div>
+                <button type="button" onClick={() => setForm({ ...form, directors: form.directors.filter((_, directorIndex) => directorIndex !== index) })} className="mt-3 rounded-md border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50">
+                  Remove director
+                </button>
+              </div>
+            ))}
+            {form.directors.length === 0 && <p className="rounded-md bg-paper p-4 text-sm text-ink/55">No directors extracted. Add directors manually before applying if required.</p>}
+          </div>
+        </div>
+
+        {(form.warnings.length > 0 || form.sourceNotes.length > 0 || Object.keys(form.confidenceSummary || {}).length > 0) && (
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+            <p className="font-semibold">Extraction notes</p>
+            {[...form.warnings, ...form.sourceNotes, form.confidenceSummary?.notes].filter(Boolean).map((note, index) => <p key={index} className="mt-1">{note}</p>)}
+          </div>
+        )}
+
+        <div className="flex flex-col gap-3 border-t border-ink/10 pt-5 sm:flex-row">
+          <button
+            type="button"
+            onClick={() => onApplyDocumentAnalysis({ job, reviewedData, applyMode })}
+            disabled={!canApply || isSaving}
+            className="rounded-md bg-forest px-5 py-3 text-sm font-semibold text-white disabled:bg-ink/30"
+          >
+            {applyMode === 'update' ? 'Update matched company' : 'Create company and directors'}
+          </button>
+          {job.status === 'applied' && <span className="self-center text-sm font-semibold text-forest">Applied to company records</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function updateDirectorExtraction(form, setForm, index, patch) {
+  setForm({
+    ...form,
+    directors: form.directors.map((director, directorIndex) => directorIndex === index ? { ...director, ...patch } : director)
+  });
+}
+
+function AnalysisStatusBadge({ status }) {
+  const styles = {
+    queued: 'border-ink/10 bg-paper text-ink/55',
+    analyzing: 'border-blue-200 bg-blue-50 text-blue-800',
+    review_required: 'border-amber-200 bg-amber-50 text-amber-800',
+    applied: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+    failed: 'border-red-200 bg-red-50 text-red-800'
+  };
+  return <span className={`shrink-0 rounded-full border px-3 py-1 text-xs font-semibold ${styles[status] || styles.queued}`}>{analysisStatusLabel(status)}</span>;
+}
+
+function analysisStatusLabel(status) {
+  return {
+    queued: 'Queued',
+    analyzing: 'Analyzing',
+    review_required: 'Review',
+    applied: 'Applied',
+    failed: 'Failed'
+  }[status] || 'Queued';
+}
+
+function analysisTypeLabel(type) {
+  return {
+    company_onboarding: 'Company onboarding',
+    shareholder_intake: 'Shareholder intake',
+    share_transfer: 'Share transfer'
+  }[type] || 'Document analysis';
 }
 
 function RecentActivityPanel({ activity, companies, onSelectCompany }) {
