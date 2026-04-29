@@ -367,11 +367,16 @@ function App() {
       if (data.session && params.get('view') !== 'landing') {
         setView('dashboard');
       }
+    }).catch((error) => {
+      if (!active) return;
+      setAppError(error.message || 'Could not restore your session.');
+      setIsLoading(false);
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
       if (nextSession) {
+        setIsLoading(false);
         setView('dashboard');
       } else {
         setPractice(null);
@@ -385,6 +390,7 @@ function App() {
         setOperationNotice(null);
         setActiveOperation('');
         setCurrentUserRole(hasSupabaseConfig ? 'read_only' : 'owner');
+        setIsLoading(false);
         setView('landing');
       }
     });
@@ -398,7 +404,16 @@ function App() {
   useEffect(() => {
     if (!hasSupabaseConfig || !session) return;
     bootstrapWorkspace(session.user);
-  }, [session]);
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    if (!isLoading) return undefined;
+    const timer = window.setTimeout(() => {
+      setIsLoading(false);
+      setAppError('The workspace took too long to refresh. You can continue working, or refresh the page if data looks stale.');
+    }, 12000);
+    return () => window.clearTimeout(timer);
+  }, [isLoading]);
 
   const bootstrapWorkspace = async (user) => {
     const { data: membership, error: membershipError } = await supabase
