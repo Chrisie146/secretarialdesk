@@ -693,7 +693,7 @@ function App() {
     showSuccess('Company added', `${nextCompany.name} is now in your compliance workspace.`);
   };
 
-  const uploadAnalysisDocuments = async ({ files, analysisType = 'company_onboarding' }) => {
+  const uploadAnalysisDocuments = async ({ files, analysisType = 'company_onboarding', companyId = null, shareholderId = null }) => {
     if (!requirePermission(permissions.canEditCompany, 'Your role cannot analyze company documents.')) return;
     const fileList = Array.from(files || []).filter(Boolean);
     if (!fileList.length) {
@@ -703,16 +703,18 @@ function App() {
 
     if (!hasSupabaseConfig || !session || !practice) {
       const demoJobs = fileList.map((file, index) => {
-        const extractedData = createDemoCompanyExtraction(file.name, companies.length + index + 1);
+        const extractedData = analysisType === 'trust_deed'
+          ? createDemoTrustExtraction(file.name)
+          : createDemoCompanyExtraction(file.name, companies.length + index + 1);
         return {
           id: `analysis-${Date.now()}-${index}`,
           practiceId: 'demo',
-          companyId: null,
+          companyId,
           documentId: `doc-${Date.now()}-${index}`,
           analysisType,
           status: 'review_required',
           extractedData,
-          reviewedData: {},
+          reviewedData: shareholderId ? { shareholderId } : {},
           confidenceSummary: extractedData.confidenceSummary || {},
           errorMessage: '',
           createdAt: new Date().toISOString(),
@@ -751,8 +753,8 @@ function App() {
         .from('documents')
         .insert({
           practice_id: practice.id,
-          company_id: null,
-          document_type: 'cipc_filing_pack',
+          company_id: companyId || null,
+          document_type: analysisType === 'trust_deed' ? 'trust_deed' : 'cipc_filing_pack',
           original_filename: file.name,
           file_path: filePath,
           status: 'queued',
@@ -771,10 +773,11 @@ function App() {
         .from('document_analysis_jobs')
         .insert({
           practice_id: practice.id,
-          company_id: null,
+          company_id: companyId || null,
           document_id: documentRow.id,
           analysis_type: analysisType,
           status: 'queued',
+          reviewed_data: shareholderId ? { shareholderId } : {},
           created_by: session.user.id
         })
         .select('id, practice_id, company_id, document_id, analysis_type, status, extracted_data, reviewed_data, confidence_summary, error_message, created_at, updated_at, documents(id, document_type, original_filename, file_path, status)')
@@ -925,6 +928,11 @@ function App() {
 
   const applyDocumentAnalysis = async ({ job, reviewedData, applyMode }) => {
     if (!requirePermission(permissions.canEditCompany, 'Your role cannot apply analyzed company data.')) return;
+    if (job.analysisType === 'trust_deed') {
+      await applyTrustDeedAnalysis(job, reviewedData);
+      return;
+    }
+
     const normalized = normalizeCompanyExtraction(reviewedData);
     if (!normalized.company.name || !normalized.company.registrationNumber) {
       setAppError('Company name and registration number are required before applying analysis.');
@@ -936,6 +944,92 @@ function App() {
     } else {
       await createCompanyFromAnalysis(job, normalized);
     }
+  };
+
+  const applyTrustDeedAnalysis = async (job, reviewedData) => {
+    if (!requirePermission(permissions.canEditBoRecords, 'Your role cannot save trust reviews.')) return;
+    const normalized = normalizeTrustExtraction(reviewedData);
+    const companyId = job.companyId;
+    const shareholderId = normalized.shareholderId || job.reviewedData?.shareholderId;
+    if (!companyId || !shareholderId) {
+      setAppError('Select a company and trust shareholder before applying Trust Deed analysis.');
+      return;
+    }
+
+    const currentDetail = companyDetails[companyId] || createEmptyCompanyDetail();
+    const existingReview = currentDetail.trustReviews.find((item) => String(item.shareholderId) === String(shareholderId));
+    const payload = {
+      shareholderId,
+      trustees: normalized.trustees,
+      beneficiaries: normalized.beneficiaries,
+      founders: normalized.founders,
+      controllers: normalized.controllers,
+      notes: normalized.notes
+    };
+
+    if (hasSupabaseConfig && session) {
+      setActiveOperation('Saving Trust Deed review...');
+      const query = existingReview?.id
+        ? supabase.from('trust_reviews').update({
+          trustees: payload.trustees,
+          beneficiaries: payload.beneficiaries,
+          founders: payload.founders,
+          controllers: payload.controllers,
+          notes: payload.notes || null,
+          reviewed_at: new Date().toISOString()
+        }).eq('id', existingReview.id)
+        : supabase.from('trust_reviews').insert({
+          company_id: companyId,
+          shareholder_id: isUuid(shareholderId) ? shareholderId : null,
+          trustees: payload.trustees,
+          beneficiaries: payload.beneficiaries,
+          founders: payload.founders,
+          controllers: payload.controllers,
+          notes: payload.notes || null
+        });
+
+      const { data, error } = await query
+        .select('id, shareholder_id, trustees, beneficiaries, founders, controllers, notes, reviewed_at, created_at')
+        .single();
+
+      if (error) {
+        setActiveOperation('');
+        setAppError(error.message);
+        return;
+      }
+
+      await supabase.from('documents').update({ status: 'complete', extracted_data: normalized }).eq('id', job.documentId);
+      await supabase.from('document_analysis_jobs').update({
+        status: 'applied',
+        reviewed_data: normalized,
+        updated_at: new Date().toISOString()
+      }).eq('id', job.id);
+
+      const mappedReview = mapTrustReviewRow(data);
+      setCompanyDetails((current) => {
+        const existing = current[companyId] || createEmptyCompanyDetail();
+        const reviews = existingReview
+          ? existing.trustReviews.map((item) => String(item.id) === String(existingReview.id) ? mappedReview : item)
+          : [mappedReview, ...existing.trustReviews];
+        const documents = job.document ? [{ ...job.document, companyId, status: 'complete', extractedData: normalized }, ...(existing.documents || [])] : existing.documents;
+        return { ...current, [companyId]: { ...existing, trustReviews: reviews, documents } };
+      });
+      updateAnalysisJobApplied(job.id, companyId, normalized);
+      setActiveOperation('');
+      showSuccess('Trust review saved', 'Trust Deed people were saved to the company BO review.');
+      return;
+    }
+
+    const localReview = { id: existingReview?.id || Date.now(), ...payload, reviewedAt: new Date().toISOString() };
+    setCompanyDetails((current) => {
+      const existing = current[companyId] || createEmptyCompanyDetail();
+      const reviews = existingReview
+        ? existing.trustReviews.map((item) => String(item.id) === String(existingReview.id) ? localReview : item)
+        : [localReview, ...existing.trustReviews];
+      return { ...current, [companyId]: { ...existing, trustReviews: reviews } };
+    });
+    updateAnalysisJobApplied(job.id, companyId, normalized);
+    showSuccess('Trust review saved', 'Trust Deed people were saved to the company BO review.');
   };
 
   const createCompanyFromAnalysis = async (job, reviewedData) => {
@@ -3002,6 +3096,7 @@ function App() {
             entityReviewLookup={entityReviewLookup}
             recentActivity={practiceActivity}
             selectedCompany={selectedCompany}
+            companyDetails={companyDetails}
             companyDetail={selectedCompany ? companyDetails[selectedCompany.id] || createEmptyCompanyDetail() : null}
             onSelectCompany={selectCompany}
             onImportCompanies={importCompanies}
@@ -4320,6 +4415,7 @@ function Dashboard({
   allTasks,
   recentActivity,
   selectedCompany,
+  companyDetails,
   companyDetail,
   onSelectCompany,
   onImportCompanies,
@@ -4575,6 +4671,7 @@ function Dashboard({
               ) : workspaceView === 'documents' ? (
                 <DocumentAnalyzerWorkspace
                   companies={companies}
+                  companyDetails={companyDetails}
                   analysisJobs={analysisJobs}
                   permissions={permissions}
                   isSaving={isSavingDetail || isSavingCompany}
@@ -8725,12 +8822,61 @@ function normalizeCompanyExtraction(data = {}) {
   };
 }
 
+function normalizeTrustExtraction(data = {}) {
+  const trust = data.trust || {};
+  const normalizePeople = (people) => (Array.isArray(people) ? people : []).map((person) => ({
+    fullName: String(person.fullName || person.full_name || person.name || '').trim(),
+    idNumber: String(person.idNumber || person.id_number || person.identityNumber || '').trim(),
+    ownershipPercentage: Number(person.ownershipPercentage || person.ownership_percentage || 0),
+    notes: String(person.notes || person.sourceNote || person.source_note || '').trim()
+  })).filter((person) => person.fullName || person.idNumber || person.notes);
+
+  const notes = [
+    String(data.notes || '').trim(),
+    ...(Array.isArray(data.sourceNotes) ? data.sourceNotes.map(String) : [])
+  ].filter(Boolean).join('\n');
+
+  return {
+    shareholderId: String(data.shareholderId || data.shareholder_id || '').trim(),
+    trust: {
+      name: String(trust.name || '').trim(),
+      registrationNumber: String(trust.registrationNumber || trust.registration_number || '').trim(),
+      masterReference: String(trust.masterReference || trust.master_reference || '').trim()
+    },
+    trustees: normalizePeople(data.trustees),
+    beneficiaries: normalizePeople(data.beneficiaries),
+    founders: normalizePeople(data.founders),
+    controllers: normalizePeople(data.controllers),
+    notes,
+    warnings: Array.isArray(data.warnings) ? data.warnings.map(String) : [],
+    sourceNotes: Array.isArray(data.sourceNotes) ? data.sourceNotes.map(String) : [],
+    confidenceSummary: data.confidenceSummary || data.confidence_summary || {}
+  };
+}
+
 function normalizeCompanyType(value) {
   const text = String(value || '').trim().toLowerCase();
   if (text.includes('public')) return 'Public Company';
   if (text.includes('non-profit') || text.includes('non profit') || text.includes('npc')) return 'Non-Profit Company';
   if (text.includes('personal liability') || text.includes('inc')) return 'Personal Liability Company';
   return 'Pty Ltd';
+}
+
+function createDemoTrustExtraction(filename) {
+  return normalizeTrustExtraction({
+    trust: {
+      name: filename.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ') || 'Example Family Trust',
+      registrationNumber: '',
+      masterReference: ''
+    },
+    trustees: [{ fullName: 'Review Required Trustee', idNumber: '', ownershipPercentage: 0, notes: 'Demo extraction placeholder.' }],
+    beneficiaries: [],
+    founders: [],
+    controllers: [],
+    warnings: ['Demo mode uses sample Trust Deed data. Configure Supabase and AI provider secrets for real PDF analysis.'],
+    sourceNotes: [`Source file: ${filename}`],
+    confidenceSummary: { trust: 'low', people: 'low', notes: 'Demo extraction only.' }
+  });
 }
 
 function createDemoCompanyExtraction(filename, index = 1) {
@@ -9930,10 +10076,15 @@ function DashboardHome({ stats, companies, allTasks, recentActivity, onAddCompan
   );
 }
 
-function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSaving, onUploadAnalysisDocuments, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onRemoveAnalysisJob, onOpenStoragePath }) {
+function DocumentAnalyzerWorkspace({ companies, companyDetails, analysisJobs, permissions, isSaving, onUploadAnalysisDocuments, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onRemoveAnalysisJob, onOpenStoragePath }) {
   const [files, setFiles] = useState([]);
+  const [analysisType, setAnalysisType] = useState('company_onboarding');
+  const [targetCompanyId, setTargetCompanyId] = useState('');
+  const [targetShareholderId, setTargetShareholderId] = useState('');
   const [selectedJobId, setSelectedJobId] = useState(analysisJobs[0]?.id || '');
   const selectedJob = analysisJobs.find((job) => job.id === selectedJobId) || analysisJobs[0] || null;
+  const targetCompanyDetail = targetCompanyId ? companyDetails?.[targetCompanyId] || createEmptyCompanyDetail() : createEmptyCompanyDetail();
+  const trustShareholders = (targetCompanyDetail.shareholders || []).filter((shareholder) => shareholder.shareholderType === 'trust');
 
   useEffect(() => {
     if (!analysisJobs.length) {
@@ -9947,10 +10098,20 @@ function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSav
 
   const submit = (event) => {
     event.preventDefault();
-    onUploadAnalysisDocuments({ files, analysisType: 'company_onboarding' });
+    onUploadAnalysisDocuments({
+      files,
+      analysisType,
+      companyId: analysisType === 'trust_deed' ? targetCompanyId : null,
+      shareholderId: analysisType === 'trust_deed' ? targetShareholderId : null
+    });
     setFiles([]);
     event.currentTarget.reset();
   };
+
+  const uploadDisabled = isSaving ||
+    !permissions.canEditCompany ||
+    files.length === 0 ||
+    (analysisType === 'trust_deed' && (!targetCompanyId || !targetShareholderId));
 
   return (
     <div className="space-y-6">
@@ -9969,8 +10130,36 @@ function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSav
         <div className="grid gap-5 p-5 xl:grid-cols-[360px_minmax(0,1fr)]">
           <div className="space-y-4">
             <form onSubmit={submit} className="rounded-md border border-ink/10 bg-paper p-4">
-              <p className="text-sm font-semibold">1. Upload company documents</p>
-              <p className="mt-1 text-sm leading-6 text-ink/55">Use company registration certificates, CoR documents or CIPC disclosure PDFs.</p>
+              <p className="text-sm font-semibold">1. Upload documents</p>
+              <p className="mt-1 text-sm leading-6 text-ink/55">Choose an intake type, upload the PDF, then review extracted data before applying it.</p>
+              <label className="mt-4 block">
+                <span className="mb-2 block text-sm font-medium">Analyzer type</span>
+                <select value={analysisType} onChange={(event) => { setAnalysisType(event.target.value); setTargetShareholderId(''); }} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm">
+                  <option value="company_onboarding">Company onboarding</option>
+                  <option value="trust_deed">Trust Deed / Trust Map</option>
+                </select>
+              </label>
+              {analysisType === 'trust_deed' && (
+                <div className="mt-4 space-y-3 rounded-md border border-amber-200 bg-amber-50 p-3">
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-medium">Company</span>
+                    <select value={targetCompanyId} onChange={(event) => { setTargetCompanyId(event.target.value); setTargetShareholderId(''); }} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm">
+                      <option value="">Select company</option>
+                      {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="mb-2 block text-sm font-medium">Trust shareholder</span>
+                    <select value={targetShareholderId} onChange={(event) => setTargetShareholderId(event.target.value)} disabled={!targetCompanyId || trustShareholders.length === 0} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm disabled:bg-ink/5">
+                      <option value="">Select trust shareholder</option>
+                      {trustShareholders.map((shareholder) => <option key={shareholder.id} value={shareholder.id}>{shareholder.name}</option>)}
+                    </select>
+                    {targetCompanyId && trustShareholders.length === 0 && (
+                      <span className="mt-2 block text-xs leading-5 text-amber-900">Open this company and add a trust shareholder before analyzing a Trust Deed.</span>
+                    )}
+                  </label>
+                </div>
+              )}
               <label className="mt-4 block">
                 <span className="mb-2 block text-sm font-medium">PDF files</span>
                 <input
@@ -9986,7 +10175,7 @@ function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSav
                   {files.map((file) => <p key={`${file.name}-${file.size}`} className="truncate">{file.name}</p>)}
                 </div>
               )}
-              <button disabled={isSaving || !permissions.canEditCompany || files.length === 0} className="mt-4 w-full rounded-md bg-forest px-4 py-3 text-sm font-semibold text-white disabled:bg-ink/30">
+              <button disabled={uploadDisabled} className="mt-4 w-full rounded-md bg-forest px-4 py-3 text-sm font-semibold text-white disabled:bg-ink/30">
                 {isSaving ? 'Processing...' : 'Analyze documents'}
               </button>
             </form>
@@ -10038,6 +10227,7 @@ function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSav
           <DocumentAnalysisReview
             job={selectedJob}
             companies={companies}
+            companyDetails={companyDetails}
             permissions={permissions}
             isSaving={isSaving}
             onApplyDocumentAnalysis={onApplyDocumentAnalysis}
@@ -10050,7 +10240,7 @@ function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSav
   );
 }
 
-function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onOpenStoragePath }) {
+function DocumentAnalysisReview({ job, companies, companyDetails, permissions, isSaving, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onOpenStoragePath }) {
   const extracted = normalizeCompanyExtraction(job?.reviewedData && Object.keys(job.reviewedData).length ? job.reviewedData : job?.extractedData || {});
   const suggestedMatch = companies.find((company) =>
     normalizeCompanyRegistrationNumber(company.registrationNumber).toLowerCase() ===
@@ -10078,6 +10268,21 @@ function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApply
           <p className="mt-1 text-sm text-ink/55">Upload a PDF to review extracted company data.</p>
         </div>
       </div>
+    );
+  }
+
+  if (job.analysisType === 'trust_deed') {
+    return (
+      <TrustDeedAnalysisReview
+        job={job}
+        companies={companies}
+        companyDetails={companyDetails}
+        permissions={permissions}
+        isSaving={isSaving}
+        onApplyDocumentAnalysis={onApplyDocumentAnalysis}
+        onRetryDocumentAnalysis={onRetryDocumentAnalysis}
+        onOpenStoragePath={onOpenStoragePath}
+      />
     );
   }
 
@@ -10272,6 +10477,184 @@ function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApply
   );
 }
 
+function TrustDeedAnalysisReview({ job, companies, companyDetails, permissions, isSaving, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onOpenStoragePath }) {
+  const extracted = normalizeTrustExtraction({ ...job.extractedData, ...job.reviewedData });
+  const [form, setForm] = useState(extracted);
+  const company = companies.find((item) => String(item.id) === String(job.companyId));
+  const companyDetail = job.companyId ? companyDetails?.[job.companyId] || createEmptyCompanyDetail() : createEmptyCompanyDetail();
+  const trustShareholder = (companyDetail.shareholders || []).find((item) => String(item.id) === String(form.shareholderId));
+  const providerLabel = analysisProviderLabel(form, job);
+  const peopleRows = [
+    ...form.trustees.map((person) => ({ ...person, role: 'trustee' })),
+    ...form.beneficiaries.map((person) => ({ ...person, role: 'beneficiary' })),
+    ...form.founders.map((person) => ({ ...person, role: 'founder' })),
+    ...form.controllers.map((person) => ({ ...person, role: 'controller' }))
+  ];
+
+  useEffect(() => {
+    setForm(normalizeTrustExtraction({ ...job.extractedData, ...job.reviewedData }));
+  }, [job.id, job.status]);
+
+  const updatePeople = (role, people) => {
+    setForm((current) => ({ ...current, [trustRoleCollectionKey(role)]: people }));
+  };
+
+  const canApply = permissions.canEditBoRecords && job.status === 'review_required' && form.shareholderId && peopleRows.some((person) => person.fullName.trim());
+
+  return (
+    <div className="rounded-md border border-ink/10 bg-white">
+      <div className="border-b border-ink/10 px-5 py-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h4 className="font-semibold">3. Review Trust Deed extraction</h4>
+            <p className="mt-1 text-sm text-ink/55">{job.document?.originalFilename || 'Uploaded Trust Deed'}</p>
+          </div>
+          <AnalysisStatusBadge status={job.status} />
+        </div>
+      </div>
+
+      <div className="space-y-5 p-5">
+        <div className="grid gap-3 md:grid-cols-3">
+          <InfoTile label="AI provider" value={providerLabel} />
+          <InfoTile label="Trust confidence" value={confidenceLabel(form.confidenceSummary?.trust)} />
+          <InfoTile label="People confidence" value={confidenceLabel(form.confidenceSummary?.people)} />
+        </div>
+
+        <div className="rounded-md border border-ink/10 bg-paper p-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <p className="text-sm font-semibold">Analysis history</p>
+              <p className="mt-1 text-sm text-ink/60">{company?.name || 'Company not selected'} - {trustShareholder?.name || 'Trust shareholder not selected'}</p>
+              {job.errorMessage && <p className="mt-2 text-sm text-red-700">{job.errorMessage}</p>}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => onRetryDocumentAnalysis(job)} disabled={job.status === 'applied' || job.status === 'analyzing' || isSaving} className="rounded-md border border-gold/60 px-3 py-2 text-sm font-semibold text-gold hover:bg-gold/5 disabled:opacity-40">
+                Retry analysis
+              </button>
+              <button type="button" onClick={() => onOpenStoragePath(job.document.filePath)} disabled={!job.document?.filePath} className="rounded-md border border-forest/30 px-3 py-2 text-sm font-semibold text-forest hover:bg-sage disabled:opacity-40">
+                View source PDF
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <TrustMap trustName={trustShareholder?.name || form.trust.name || 'Trust'} peopleRows={peopleRows} />
+
+        <div className="grid gap-4 lg:grid-cols-3">
+          <Field label="Trust name" value={form.trust.name} onChange={(name) => setForm({ ...form, trust: { ...form.trust, name } })} />
+          <Field label="Trust registration number" value={form.trust.registrationNumber} onChange={(registrationNumber) => setForm({ ...form, trust: { ...form.trust, registrationNumber } })} />
+          <Field label="Master reference" value={form.trust.masterReference} onChange={(masterReference) => setForm({ ...form, trust: { ...form.trust, masterReference } })} />
+        </div>
+
+        <TrustPeopleEditor title="Trustees" role="trustee" people={form.trustees} onChange={(people) => updatePeople('trustee', people)} />
+        <TrustPeopleEditor title="Beneficiaries" role="beneficiary" people={form.beneficiaries} onChange={(people) => updatePeople('beneficiary', people)} />
+        <TrustPeopleEditor title="Founder / settlor" role="founder" people={form.founders} onChange={(people) => updatePeople('founder', people)} />
+        <TrustPeopleEditor title="Protectors / controllers" role="controller" people={form.controllers} onChange={(people) => updatePeople('controller', people)} />
+
+        <Field label="Review notes" value={form.notes} onChange={(notes) => setForm({ ...form, notes })} placeholder="Clause references, uncertainty, or source notes" />
+
+        {(form.warnings.length > 0 || form.sourceNotes.length > 0 || form.confidenceSummary?.notes) && (
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+            <p className="font-semibold">Extraction notes</p>
+            {[...form.warnings, ...form.sourceNotes, form.confidenceSummary?.notes].filter(Boolean).map((note, index) => <p key={index} className="mt-1">{note}</p>)}
+          </div>
+        )}
+
+        <div className="border-t border-ink/10 pt-5">
+          <button
+            type="button"
+            onClick={() => onApplyDocumentAnalysis({ job, reviewedData: form, applyMode: 'trust_deed' })}
+            disabled={!canApply || isSaving}
+            className="rounded-md bg-forest px-5 py-3 text-sm font-semibold text-white disabled:bg-ink/30"
+          >
+            Save trust review
+          </button>
+          {job.status === 'applied' && <span className="ml-3 text-sm font-semibold text-forest">Applied to trust review records</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InfoTile({ label, value }) {
+  return (
+    <div className="rounded-md border border-ink/10 bg-paper px-4 py-3">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-ink/50">{label}</p>
+      <p className="mt-2 text-sm font-semibold text-ink">{value}</p>
+    </div>
+  );
+}
+
+function TrustPeopleEditor({ title, role, people, onChange }) {
+  const rows = people.length ? people : [{ fullName: '', idNumber: '', ownershipPercentage: 0, notes: '' }];
+  const update = (index, patch) => onChange(rows.map((person, personIndex) => personIndex === index ? { ...person, ...patch } : person));
+  const remove = (index) => onChange(rows.filter((_, personIndex) => personIndex !== index));
+  const add = () => onChange([...rows.filter((person) => person.fullName.trim()), { fullName: '', idNumber: '', ownershipPercentage: 0, notes: '' }]);
+
+  return (
+    <div className="rounded-md border border-ink/10">
+      <div className="flex items-center justify-between gap-3 border-b border-ink/10 bg-paper px-4 py-3">
+        <p className="text-sm font-semibold">{title}</p>
+        <button type="button" onClick={add} className="rounded-md border border-forest/40 px-3 py-2 text-xs font-semibold text-forest hover:bg-sage">Add</button>
+      </div>
+      <div className="space-y-3 p-3">
+        {rows.map((person, index) => (
+          <div key={`${role}-${index}`} className="grid gap-3 rounded-md border border-ink/10 p-3 lg:grid-cols-[minmax(0,1fr)_180px_120px_minmax(0,1fr)_auto] lg:items-end">
+            <Field label="Name" value={person.fullName} onChange={(fullName) => update(index, { fullName })} placeholder="Natural person name" />
+            <Field label="ID / passport" value={person.idNumber} onChange={(idNumber) => update(index, { idNumber })} />
+            <Field type="number" label="Ownership %" value={person.ownershipPercentage} onChange={(ownershipPercentage) => update(index, { ownershipPercentage })} />
+            <Field label="Notes" value={person.notes} onChange={(notes) => update(index, { notes })} placeholder="Clause or control note" />
+            <button type="button" onClick={() => remove(index)} disabled={rows.length === 1} className="rounded-md border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-40">Remove</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TrustMap({ trustName, peopleRows }) {
+  const roles = [
+    { key: 'founder', label: 'Founders / settlors' },
+    { key: 'trustee', label: 'Trustees' },
+    { key: 'beneficiary', label: 'Beneficiaries' },
+    { key: 'controller', label: 'Controllers' }
+  ];
+  return (
+    <div className="rounded-md border border-ink/10 bg-paper p-4">
+      <p className="mb-4 text-sm font-semibold">Trust Map</p>
+      <div className="grid gap-3 lg:grid-cols-[1fr_220px_1fr] lg:items-center">
+        <div className="space-y-3">
+          {roles.slice(0, 2).map((role) => <TrustMapGroup key={role.key} role={role} people={peopleRows.filter((person) => person.role === role.key)} />)}
+        </div>
+        <div className="rounded-md border border-forest/30 bg-white p-4 text-center shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-forest">Trust</p>
+          <p className="mt-2 font-semibold">{trustName}</p>
+        </div>
+        <div className="space-y-3">
+          {roles.slice(2).map((role) => <TrustMapGroup key={role.key} role={role} people={peopleRows.filter((person) => person.role === role.key)} />)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TrustMapGroup({ role, people }) {
+  return (
+    <div className="rounded-md border border-ink/10 bg-white p-3">
+      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-ink/50">{role.label}</p>
+      <div className="mt-2 space-y-2">
+        {people.filter((person) => person.fullName.trim()).map((person, index) => (
+          <div key={`${role.key}-${index}`} className="rounded-md bg-sage px-3 py-2 text-sm">
+            <p className="font-semibold">{person.fullName}</p>
+            <p className="text-xs text-ink/55">{person.idNumber || 'ID not captured'}{Number(person.ownershipPercentage || 0) > 0 ? ` - ${person.ownershipPercentage}%` : ''}</p>
+          </div>
+        ))}
+        {people.filter((person) => person.fullName.trim()).length === 0 && <p className="text-sm text-ink/45">None captured</p>}
+      </div>
+    </div>
+  );
+}
+
 function updateDirectorExtraction(form, setForm, index, patch) {
   setForm({
     ...form,
@@ -10320,6 +10703,15 @@ function confidenceLabel(value) {
   return 'Not stated';
 }
 
+function trustRoleCollectionKey(role) {
+  return {
+    trustee: 'trustees',
+    beneficiary: 'beneficiaries',
+    founder: 'founders',
+    controller: 'controllers'
+  }[role] || 'trustees';
+}
+
 function documentStatusLabel(status) {
   return {
     queued: 'Queued',
@@ -10346,7 +10738,8 @@ function analysisTypeLabel(type) {
   return {
     company_onboarding: 'Company onboarding',
     shareholder_intake: 'Shareholder intake',
-    share_transfer: 'Share transfer'
+    share_transfer: 'Share transfer',
+    trust_deed: 'Trust Deed / Trust Map'
   }[type] || 'Document analysis';
 }
 

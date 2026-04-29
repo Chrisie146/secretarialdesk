@@ -41,7 +41,7 @@ Deno.serve(async (req) => {
 
     const { data: allowedJob, error: allowedError } = await userClient
       .from('document_analysis_jobs')
-      .select('id, document_id')
+      .select('id, document_id, analysis_type')
       .eq('id', jobId)
       .eq('document_id', documentId)
       .maybeSingle();
@@ -84,7 +84,8 @@ Deno.serve(async (req) => {
     }
 
     const base64 = await blobToBase64(fileData);
-    const extracted = await analyzeDocument(base64, documentRecord.original_filename || 'company-document.pdf');
+    const analysisType = allowedJob.analysis_type || 'company_onboarding';
+    const extracted = await analyzeDocument(base64, documentRecord.original_filename || 'company-document.pdf', analysisType);
 
     await supabase
       .from('documents')
@@ -113,7 +114,39 @@ Deno.serve(async (req) => {
   }
 });
 
-function buildExtractionPrompt(filename: string) {
+function buildExtractionPrompt(filename: string, analysisType = 'company_onboarding') {
+  if (analysisType === 'trust_deed') {
+    return `You are extracting Trust Deed data for a South African beneficial ownership compliance app.
+Return only valid JSON with this exact shape:
+{
+  "trust": {
+    "name": "",
+    "registrationNumber": "",
+    "masterReference": ""
+  },
+  "trustees": [
+    { "fullName": "", "idNumber": "", "ownershipPercentage": 0, "notes": "" }
+  ],
+  "beneficiaries": [
+    { "fullName": "", "idNumber": "", "ownershipPercentage": 0, "notes": "" }
+  ],
+  "founders": [
+    { "fullName": "", "idNumber": "", "ownershipPercentage": 0, "notes": "" }
+  ],
+  "controllers": [
+    { "fullName": "", "idNumber": "", "ownershipPercentage": 0, "notes": "" }
+  ],
+  "warnings": [],
+  "sourceNotes": [],
+  "confidenceSummary": {
+    "trust": "high|medium|low",
+    "people": "high|medium|low",
+    "notes": ""
+  }
+}
+Use South African trust terminology. Extract only natural persons. Use 0 ownership where the person controls the trust but no fixed percentage is stated. Include clause/page references in notes when visible. Do not invent IDs, dates or names. Filename: ${filename}`;
+  }
+
   return `You are extracting company onboarding data for a South African company secretarial compliance app.
 Return only valid JSON with this exact shape:
 {
@@ -138,14 +171,14 @@ Return only valid JSON with this exact shape:
 Use South African terminology. Prefer CIPC registration numbers like 2020/123456/07. Leave fields blank when not present. Do not invent IDs, dates or names. Filename: ${filename}`;
 }
 
-async function analyzeDocument(pdfBase64: string, filename: string) {
+async function analyzeDocument(pdfBase64: string, filename: string, analysisType = 'company_onboarding') {
   const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
   const anthropicApiKey = Deno.env.get('ANTHROPIC_API_KEY');
   const failures: string[] = [];
 
   if (geminiApiKey) {
     try {
-      const extracted = await analyzeWithGemini(geminiApiKey, pdfBase64, filename);
+      const extracted = await analyzeWithGemini(geminiApiKey, pdfBase64, filename, analysisType);
       return {
         ...extracted,
         sourceNotes: [
@@ -160,7 +193,7 @@ async function analyzeDocument(pdfBase64: string, filename: string) {
 
   if (anthropicApiKey) {
     try {
-      const extracted = await analyzeWithClaude(anthropicApiKey, pdfBase64, filename);
+      const extracted = await analyzeWithClaude(anthropicApiKey, pdfBase64, filename, analysisType);
       return {
         ...extracted,
         warnings: [
@@ -180,8 +213,8 @@ async function analyzeDocument(pdfBase64: string, filename: string) {
   throw new Error(failures.length ? failures.join(' | ') : 'No configured AI provider could analyze the document.');
 }
 
-async function analyzeWithGemini(apiKey: string, pdfBase64: string, filename: string) {
-  const prompt = buildExtractionPrompt(filename);
+async function analyzeWithGemini(apiKey: string, pdfBase64: string, filename: string, analysisType = 'company_onboarding') {
+  const prompt = buildExtractionPrompt(filename, analysisType);
   const model = Deno.env.get('GEMINI_MODEL') || 'gemini-2.5-flash-lite';
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
     method: 'POST',
@@ -209,8 +242,8 @@ async function analyzeWithGemini(apiKey: string, pdfBase64: string, filename: st
   return JSON.parse(stripJsonFence(text));
 }
 
-async function analyzeWithClaude(apiKey: string, pdfBase64: string, filename: string) {
-  const prompt = buildExtractionPrompt(filename);
+async function analyzeWithClaude(apiKey: string, pdfBase64: string, filename: string, analysisType = 'company_onboarding') {
+  const prompt = buildExtractionPrompt(filename, analysisType);
   const model = Deno.env.get('ANTHROPIC_MODEL') || 'claude-sonnet-4-5';
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
