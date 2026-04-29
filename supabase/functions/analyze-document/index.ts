@@ -135,7 +135,7 @@ Return only valid JSON with this exact shape:
 }
 Use South African terminology. Prefer CIPC registration numbers like 2020/123456/07. Leave fields blank when not present. Do not invent IDs, dates or names. Filename: ${filename}`;
 
-  const model = Deno.env.get('GEMINI_MODEL') || 'gemini-1.5-flash';
+  const model = Deno.env.get('GEMINI_MODEL') || 'gemini-2.5-flash-lite';
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
