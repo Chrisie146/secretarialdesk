@@ -2991,106 +2991,6 @@ function buildProductionReadiness({ hasSupabaseConfig, envStatus, session, pract
   ];
 }
 
-const productionQaStorageKey = 'secretarialdesk-production-qa-v1';
-
-function loadProductionQaChecks() {
-  try {
-    return JSON.parse(window.localStorage.getItem(productionQaStorageKey) || '{}');
-  } catch {
-    return {};
-  }
-}
-
-function saveProductionQaChecks(checks) {
-  try {
-    window.localStorage.setItem(productionQaStorageKey, JSON.stringify(checks));
-  } catch {
-    // Local storage is optional; the checklist still works for the current session.
-  }
-}
-
-function buildProductionQaChecklist({ hasSupabaseConfig, session, practice, companies, qaChecks, databaseFeatures }) {
-  const workflowTablesReady = !hasSupabaseConfig ||
-    (databaseFeatures?.directorChanges?.available !== false && databaseFeatures?.shareTransactions?.available !== false);
-  return [
-    {
-      key: 'supabase-configured',
-      label: 'Supabase configured',
-      ok: hasSupabaseConfig,
-      detail: hasSupabaseConfig ? 'The app is using Supabase instead of demo mode.' : 'Add Supabase env vars before production testing.'
-    },
-    {
-      key: 'signed-in',
-      label: 'Authentication tested',
-      ok: Boolean(session?.user?.email),
-      detail: session?.user?.email ? `Signed in as ${session.user.email}.` : 'Sign up/sign in with a real user.'
-    },
-    {
-      key: 'practice-loaded',
-      label: 'Practice workspace loaded',
-      ok: Boolean(practice?.id),
-      detail: practice?.id ? 'Practice and role context are available.' : 'Create or join a practice.'
-    },
-    {
-      key: 'migration-016',
-      label: 'Migration 016 run',
-      ok: workflowTablesReady && Boolean(qaChecks['migration-016']),
-      manual: true,
-      detail: workflowTablesReady
-        ? 'Confirm director_changes and share_transactions tables exist with RLS policies.'
-        : 'Run migration 016_secretarial_filing_workflows.sql before completing workflow QA.'
-    },
-    {
-      key: 'company-create-refresh',
-      label: 'Company creation persists after refresh',
-      ok: Boolean(qaChecks['company-create-refresh']),
-      manual: true,
-      detail: 'Create a company, refresh, and confirm it remains visible.'
-    },
-    {
-      key: 'bo-flow-refresh',
-      label: 'BO workflow persists after refresh',
-      ok: Boolean(qaChecks['bo-flow-refresh']),
-      manual: true,
-      detail: 'Capture shareholders, trust/company look-through and BO records, then refresh and confirm they remain.'
-    },
-    {
-      key: 'filing-pack-generate',
-      label: 'Filing pack generation tested',
-      ok: Boolean(qaChecks['filing-pack-generate']),
-      manual: true,
-      detail: 'Generate BO Register and Mandate PDFs/CSV, then confirm filing history is created.'
-    },
-    {
-      key: 'director-change-refresh',
-      label: 'Director change workflow persists',
-      ok: Boolean(qaChecks['director-change-refresh']),
-      manual: true,
-      detail: 'Create, submit and accept a director change, refresh, and confirm the filing and director register.'
-    },
-    {
-      key: 'share-transaction-refresh',
-      label: 'Share transaction workflow persists',
-      ok: Boolean(qaChecks['share-transaction-refresh']),
-      manual: true,
-      detail: 'Create and accept a share transaction, refresh, and confirm the transaction and shareholder register.'
-    },
-    {
-      key: 'activity-log',
-      label: 'Activity log records key actions',
-      ok: Boolean(qaChecks['activity-log']),
-      manual: true,
-      detail: 'Confirm company, BO, filing pack, director change and share transaction actions appear in Activity.'
-    },
-    {
-      key: 'companies-loaded',
-      label: 'At least one client company loaded',
-      ok: companies.length > 0,
-      detail: `${companies.length} compan${companies.length === 1 ? 'y' : 'ies'} currently loaded.`
-    }
-  ];
-}
-
 function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
 }
@@ -9772,7 +9672,6 @@ function PracticeSettingsWorkspace({
   const [practiceName, setPracticeName] = useState(practice?.name || 'Smith & Partners Inc.');
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('member');
-  const [qaChecks, setQaChecks] = useState(() => loadProductionQaChecks());
   const [restoreText, setRestoreText] = useState('');
   const restorePreview = useMemo(() => parsePracticeRestoreRows(restoreText, companies), [restoreText, companies]);
   const restoreValidRows = restorePreview.rows.filter((row) => row.valid);
@@ -9809,15 +9708,6 @@ function PracticeSettingsWorkspace({
     setRestoreText('');
   };
 
-  const health = [
-    { label: 'Supabase configuration', ok: hasSupabaseConfig, detail: hasSupabaseConfig ? 'Environment variables are present.' : 'Using local demo mode.' },
-    { label: 'Authenticated user', ok: Boolean(session?.user?.email), detail: session?.user?.email || 'No active Supabase session.' },
-    { label: 'Practice workspace', ok: Boolean(practice?.id), detail: practice?.id || 'No practice loaded.' },
-    { label: 'Company table access', ok: Array.isArray(companies), detail: `${companies.length} companies loaded.` },
-    { label: 'Membership records', ok: practiceMembers.length > 0 || !hasSupabaseConfig, detail: hasSupabaseConfig ? `${practiceMembers.length} member records visible.` : 'Skipped in demo mode.' },
-    { label: 'Director workflow table', ok: !hasSupabaseConfig || databaseFeatures?.directorChanges?.available !== false, detail: databaseFeatures?.directorChanges?.available === false ? databaseFeatureUnavailableMessage('Director change filings', databaseFeatures.directorChanges) : 'Available or not checked yet.' },
-    { label: 'Share workflow table', ok: !hasSupabaseConfig || databaseFeatures?.shareTransactions?.available !== false, detail: databaseFeatures?.shareTransactions?.available === false ? databaseFeatureUnavailableMessage('Share register maintenance', databaseFeatures.shareTransactions) : 'Available or not checked yet.' }
-  ];
   const readiness = buildProductionReadiness({
     hasSupabaseConfig,
     envStatus: supabaseEnvStatus,
@@ -9829,22 +9719,13 @@ function PracticeSettingsWorkspace({
     companies,
     databaseFeatures
   });
-  const qaItems = buildProductionQaChecklist({ hasSupabaseConfig, session, practice, companies, qaChecks, databaseFeatures });
-  const completedQa = qaItems.filter((item) => item.ok).length;
-  const toggleQaCheck = (key) => {
-    setQaChecks((current) => {
-      const next = { ...current, [key]: !current[key] };
-      saveProductionQaChecks(next);
-      return next;
-    });
-  };
 
   return (
     <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_440px]">
       <section className="rounded-lg border border-ink/10 bg-white shadow-sm">
         <div className="border-b border-ink/10 px-5 py-5">
           <h3 className="text-xl font-semibold">Practice Settings</h3>
-          <p className="mt-1 text-sm text-ink/60">Manage your practice workspace and confirm the database connection is healthy.</p>
+          <p className="mt-1 text-sm text-ink/60">Manage your practice workspace, team access, document storage and data portability.</p>
           <p className="mt-2 text-xs font-semibold uppercase tracking-wide text-ink/45">Current role: {roleLabel(currentUserRole)}</p>
         </div>
         {!permissions.canManagePractice && (
@@ -10040,21 +9921,6 @@ function PracticeSettingsWorkspace({
         </div>
       </section>
 
-      <Panel title="Health check">
-        <div className="space-y-3">
-          {health.map((item) => (
-            <div key={item.label} className="flex min-w-0 gap-3 rounded-md border border-ink/10 bg-white p-3">
-              <span className={`mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full border ${item.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-red-200 bg-red-50 text-red-700'}`}>
-                {item.ok ? <Check className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
-              </span>
-              <div className="min-w-0">
-                <p className="text-sm font-semibold">{item.label}</p>
-                <p className="break-words text-sm leading-6 text-ink/58">{item.detail}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </Panel>
       <Panel title="Document storage">
         <StorageStatusPanel hasSupabaseConfig={hasSupabaseConfig} />
       </Panel>
@@ -10071,38 +9937,6 @@ function PracticeSettingsWorkspace({
           </p>
         </div>
       </Panel>
-      <Panel title="Production QA checklist">
-        <div className="rounded-md bg-paper p-4">
-          <p className="text-sm font-semibold">{completedQa} of {qaItems.length} checks complete</p>
-          <p className="mt-1 text-sm leading-6 text-ink/60">Use this after running migrations and testing live Supabase persistence. Manual checks are stored in this browser.</p>
-        </div>
-        <div className="mt-4 space-y-3">
-          {qaItems.map((item) => (
-            <ProductionQaItem key={item.key} item={item} onToggle={() => item.manual && toggleQaCheck(item.key)} />
-          ))}
-        </div>
-      </Panel>
-    </div>
-  );
-}
-
-function ProductionQaItem({ item, onToggle }) {
-  const tone = item.ok ? 'border-emerald-200 border-l-emerald-500 text-emerald-900' : item.manual ? 'border-amber-200 border-l-amber-500 text-amber-900' : 'border-red-200 border-l-red-500 text-red-900';
-  return (
-    <div className={`rounded-md border border-l-4 bg-white px-3 py-2.5 ${tone}`}>
-      <div className="flex items-start gap-3">
-        {item.manual ? (
-          <input type="checkbox" checked={item.ok} onChange={onToggle} className="mt-1 h-4 w-4 accent-forest" />
-        ) : (
-          <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full border border-current/25 bg-white/55">
-            {item.ok ? <Check className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
-          </span>
-        )}
-        <div className="min-w-0">
-          <p className="text-sm font-semibold">{item.label}</p>
-          <p className="mt-0.5 text-sm leading-5 text-ink/65">{item.detail}</p>
-        </div>
-      </div>
     </div>
   );
 }
