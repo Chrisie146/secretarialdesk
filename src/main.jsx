@@ -10993,8 +10993,11 @@ function DocumentAnalysisReview({ job, companies, companyDetails, permissions, i
     normalizeCompanyRegistrationNumber(company.registrationNumber).toLowerCase() ===
     normalizeCompanyRegistrationNumber(extracted.company.registrationNumber).toLowerCase()
   );
+  const matchedDetail = suggestedMatch ? companyDetails?.[suggestedMatch.id] || createEmptyCompanyDetail() : createEmptyCompanyDetail();
   const [form, setForm] = useState(extracted);
   const [applyMode, setApplyMode] = useState(suggestedMatch ? 'update' : 'create');
+  const [acceptedCompanyFields, setAcceptedCompanyFields] = useState({});
+  const [acceptedDirectorKeys, setAcceptedDirectorKeys] = useState({});
 
   useEffect(() => {
     const nextExtracted = normalizeCompanyExtraction(job?.reviewedData && Object.keys(job.reviewedData).length ? job.reviewedData : job?.extractedData || {});
@@ -11004,6 +11007,8 @@ function DocumentAnalysisReview({ job, companies, companyDetails, permissions, i
     );
     setForm(nextExtracted);
     setApplyMode(nextMatch ? 'update' : 'create');
+    setAcceptedCompanyFields({});
+    setAcceptedDirectorKeys({});
   }, [job?.id]);
 
   if (!job) {
@@ -11034,10 +11039,7 @@ function DocumentAnalysisReview({ job, companies, companyDetails, permissions, i
   }
 
   const canApply = permissions.canEditCompany && job.status === 'review_required' && form.company.name.trim() && form.company.registrationNumber.trim();
-  const reviewedData = {
-    ...form,
-    matchedCompanyId: suggestedMatch?.id || null
-  };
+  const reviewedData = buildReviewedCompanyAnalysisData(form, suggestedMatch, matchedDetail, applyMode, acceptedCompanyFields, acceptedDirectorKeys);
   const providerLabel = analysisProviderLabel(form, job);
   const confidenceItems = [
     { label: 'AI provider', value: providerLabel },
@@ -11142,7 +11144,7 @@ function DocumentAnalysisReview({ job, companies, companyDetails, permissions, i
         {suggestedMatch && (
           <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
             <p className="font-semibold">Possible existing company match</p>
-            <p className="mt-1">{suggestedMatch.name} ({suggestedMatch.registrationNumber}) already exists. Choose whether to update it or create a separate record.</p>
+            <p className="mt-1">{suggestedMatch.name} ({suggestedMatch.registrationNumber}) already exists. Choose whether to update it or create a separate record. Existing data is only changed where you accept the extracted line.</p>
             <div className="mt-3 flex flex-wrap gap-3">
               <label className="flex items-center gap-2">
                 <input type="radio" checked={applyMode === 'update'} onChange={() => setApplyMode('update')} className="accent-forest" />
@@ -11154,6 +11156,21 @@ function DocumentAnalysisReview({ job, companies, companyDetails, permissions, i
               </label>
             </div>
           </div>
+        )}
+
+        {suggestedMatch && applyMode === 'update' && (
+          <CompanyAnalysisComparison
+            currentCompany={suggestedMatch}
+            currentDetail={matchedDetail}
+            extracted={form}
+            acceptedCompanyFields={acceptedCompanyFields}
+            acceptedDirectorKeys={acceptedDirectorKeys}
+            onToggleCompanyField={(field) => setAcceptedCompanyFields((current) => ({ ...current, [field]: !current[field] }))}
+            onToggleDirector={(director) => {
+              const key = directorComparisonKey(director);
+              setAcceptedDirectorKeys((current) => ({ ...current, [key]: !current[key] }));
+            }}
+          />
         )}
 
         <div className="grid gap-4 lg:grid-cols-2">
@@ -11184,6 +11201,20 @@ function DocumentAnalysisReview({ job, companies, companyDetails, permissions, i
           <div className="mt-3 space-y-3">
             {form.directors.map((director, index) => (
               <div key={index} className="rounded-md border border-ink/10 bg-paper p-3">
+                {suggestedMatch && applyMode === 'update' && (
+                  <label className="mb-3 flex items-center justify-between gap-3 rounded-md border border-ink/10 bg-white px-3 py-2 text-sm">
+                    <span className="font-semibold">Accept this director into the matched company</span>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(acceptedDirectorKeys[directorComparisonKey(director)])}
+                      onChange={() => {
+                        const key = directorComparisonKey(director);
+                        setAcceptedDirectorKeys((current) => ({ ...current, [key]: !current[key] }));
+                      }}
+                      className="h-4 w-4 rounded border-ink/20 text-forest accent-forest"
+                    />
+                  </label>
+                )}
                 <div className="grid gap-3 lg:grid-cols-3">
                   <Field label="Full name" value={director.fullName} onChange={(fullName) => updateDirectorExtraction(form, setForm, index, { fullName })} />
                   <Field label="ID / passport" value={director.idNumber} onChange={(idNumber) => updateDirectorExtraction(form, setForm, index, { idNumber })} />
@@ -11222,6 +11253,153 @@ function DocumentAnalysisReview({ job, companies, companyDetails, permissions, i
       </div>
     </div>
   );
+}
+
+function CompanyAnalysisComparison({ currentCompany, currentDetail, extracted, acceptedCompanyFields, acceptedDirectorKeys, onToggleCompanyField, onToggleDirector }) {
+  const rows = buildCompanyAnalysisComparisonRows(currentCompany, extracted.company);
+  const existingDirectorKeys = new Set((currentDetail.directors || []).map(directorComparisonKey).filter(Boolean));
+
+  return (
+    <div className="rounded-md border border-forest/20 bg-sage/55 p-4">
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-forest">Compare with current company record</p>
+          <p className="mt-1 text-sm leading-6 text-ink/60">Tick only the lines that should update the existing company. Unticked lines keep the current value.</p>
+        </div>
+        <span className="rounded-full border border-forest/20 bg-white px-3 py-1 text-xs font-semibold text-forest">
+          {rows.filter((row) => acceptedCompanyFields[row.key]).length} profile lines accepted
+        </span>
+      </div>
+
+      <div className="mt-4 max-w-full overflow-x-auto rounded-md border border-ink/10 bg-white">
+        <table className="w-full min-w-[720px] text-left text-sm">
+          <thead className="bg-paper text-xs uppercase tracking-[0.08em] text-ink/50">
+            <tr>
+              <th className="px-4 py-3">Field</th>
+              <th className="px-4 py-3">Current record</th>
+              <th className="px-4 py-3">Extracted draft</th>
+              <th className="px-4 py-3">Accept</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-ink/10">
+            {rows.map((row) => (
+              <tr key={row.key} className={row.changed ? '' : 'text-ink/55'}>
+                <td className="px-4 py-3 font-semibold">{row.label}</td>
+                <td className="px-4 py-3">{row.current || 'Not captured'}</td>
+                <td className="px-4 py-3">{row.extracted || 'Not extracted'}</td>
+                <td className="px-4 py-3">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(acceptedCompanyFields[row.key])}
+                    onChange={() => onToggleCompanyField(row.key)}
+                    disabled={!row.extracted || !row.changed}
+                    className="h-4 w-4 rounded border-ink/20 text-forest accent-forest disabled:opacity-40"
+                    aria-label={`Accept ${row.label}`}
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-4 rounded-md border border-ink/10 bg-white">
+        <div className="border-b border-ink/10 px-4 py-3">
+          <p className="text-sm font-semibold">Extracted directors</p>
+        </div>
+        <div className="divide-y divide-ink/10">
+          {extracted.directors.map((director, index) => {
+            const key = directorComparisonKey(director);
+            const alreadyExists = existingDirectorKeys.has(key);
+            return (
+              <label key={`${key || index}-${index}`} className="flex items-start justify-between gap-4 px-4 py-3 text-sm">
+                <span>
+                  <span className="block font-semibold">{director.fullName || 'Unnamed director'}</span>
+                  <span className="mt-1 block text-ink/55">
+                    {[director.idNumber, director.appointmentDate, director.sourceNote].filter(Boolean).join(' - ') || 'No ID or appointment date extracted'}
+                  </span>
+                  {alreadyExists && <span className="mt-1 block text-xs font-semibold text-amber-700">Possible existing director match</span>}
+                </span>
+                <input
+                  type="checkbox"
+                  checked={Boolean(acceptedDirectorKeys[key])}
+                  onChange={() => onToggleDirector(director)}
+                  disabled={!director.fullName?.trim() || alreadyExists}
+                  className="mt-1 h-4 w-4 rounded border-ink/20 text-forest accent-forest disabled:opacity-40"
+                  aria-label={`Accept director ${director.fullName || index + 1}`}
+                />
+              </label>
+            );
+          })}
+          {extracted.directors.length === 0 && (
+            <p className="px-4 py-4 text-sm text-ink/55">No directors extracted from this document.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function buildCompanyAnalysisComparisonRows(currentCompany, extractedCompany) {
+  const rows = [
+    { key: 'name', label: 'Company name', current: currentCompany?.name || '', extracted: extractedCompany?.name || '' },
+    { key: 'registrationNumber', label: 'Registration number', current: currentCompany?.registrationNumber || '', extracted: extractedCompany?.registrationNumber || '' },
+    { key: 'type', label: 'Company type', current: currentCompany?.type || '', extracted: extractedCompany?.type || '' },
+    { key: 'incorporationDate', label: 'Incorporation date', current: currentCompany?.incorporationDate || '', extracted: extractedCompany?.incorporationDate || '' },
+    { key: 'registeredAddress', label: 'Registered office', current: currentCompany?.registeredAddress || '', extracted: extractedCompany?.registeredAddress || '' }
+  ];
+  return rows.map((row) => ({
+    ...row,
+    changed: normalizeComparisonValue(row.current) !== normalizeComparisonValue(row.extracted)
+  }));
+}
+
+function buildReviewedCompanyAnalysisData(form, suggestedMatch, matchedDetail, applyMode, acceptedCompanyFields, acceptedDirectorKeys) {
+  if (applyMode !== 'update' || !suggestedMatch) {
+    return { ...form, matchedCompanyId: suggestedMatch?.id || null };
+  }
+
+  const currentCompany = {
+    name: suggestedMatch.name || '',
+    registrationNumber: suggestedMatch.registrationNumber || '',
+    type: suggestedMatch.type || 'Pty Ltd',
+    incorporationDate: suggestedMatch.incorporationDate || '',
+    registeredAddress: suggestedMatch.registeredAddress || ''
+  };
+  const reviewedCompany = { ...currentCompany };
+  Object.keys(currentCompany).forEach((field) => {
+    if (acceptedCompanyFields[field]) {
+      reviewedCompany[field] = form.company[field] || '';
+    }
+  });
+
+  const existingDirectorKeys = new Set((matchedDetail.directors || []).map(directorComparisonKey).filter(Boolean));
+  const directors = form.directors.filter((director) => {
+    const key = directorComparisonKey(director);
+    return key && acceptedDirectorKeys[key] && !existingDirectorKeys.has(key);
+  });
+
+  return {
+    ...form,
+    company: reviewedCompany,
+    directors,
+    matchedCompanyId: suggestedMatch.id,
+    comparisonReview: {
+      acceptedCompanyFields,
+      acceptedDirectorKeys
+    }
+  };
+}
+
+function directorComparisonKey(director) {
+  const id = normalizeComparisonValue(director?.idNumber || '');
+  if (id) return `id:${id}`;
+  const name = normalizeComparisonValue(director?.fullName || '');
+  return name ? `name:${name}` : '';
+}
+
+function normalizeComparisonValue(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
 function TrustDeedAnalysisReview({ job, companies, companyDetails, permissions, isSaving, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onOpenStoragePath }) {
