@@ -26,6 +26,7 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Upload,
   Users,
   X
@@ -780,6 +781,52 @@ function App() {
     }
 
     setAnalysisJobs((current) => current.map((job) => job.id === jobId ? mapAnalysisJobRow(refreshedJob) : job));
+  };
+
+  const removeAnalysisJob = async (job) => {
+    if (!job) return;
+    if (!requirePermission(permissions.canDeleteRecords, 'Your role cannot remove analyzer intake items.')) return;
+    const confirmed = window.confirm('Remove this document from the intake queue? Applied company records will not be changed.');
+    if (!confirmed) return;
+
+    if (!hasSupabaseConfig || !session) {
+      setAnalysisJobs((current) => current.filter((item) => item.id !== job.id));
+      showSuccess('Intake item removed', 'The document was removed from the analyzer queue.');
+      return;
+    }
+
+    setActiveOperation('Removing analyzer intake item...');
+    setAppError('');
+
+    const { error: jobError } = await supabase
+      .from('document_analysis_jobs')
+      .delete()
+      .eq('id', job.id);
+
+    if (jobError) {
+      setActiveOperation('');
+      setAppError(jobError.message);
+      return;
+    }
+
+    if (job.status !== 'applied' && job.documentId) {
+      if (job.document?.filePath) {
+        await supabase.storage.from('company-documents').remove([job.document.filePath]);
+      }
+      const { error: documentError } = await supabase
+        .from('documents')
+        .delete()
+        .eq('id', job.documentId)
+        .is('company_id', null);
+
+      if (documentError) {
+        setAppError(documentError.message);
+      }
+    }
+
+    setAnalysisJobs((current) => current.filter((item) => item.id !== job.id));
+    setActiveOperation('');
+    showSuccess('Intake item removed', 'The document was removed from the analyzer queue.');
   };
 
   const applyDocumentAnalysis = async ({ job, reviewedData, applyMode }) => {
@@ -2849,6 +2896,7 @@ function App() {
             analysisJobs={analysisJobs}
             onUploadAnalysisDocuments={uploadAnalysisDocuments}
             onApplyDocumentAnalysis={applyDocumentAnalysis}
+            onRemoveAnalysisJob={removeAnalysisJob}
             onClearCompany={() => setSelectedCompany(null)}
             onAddDirector={addDirector}
             onAddShareholder={addShareholder}
@@ -4165,6 +4213,7 @@ function Dashboard({
   analysisJobs,
   onUploadAnalysisDocuments,
   onApplyDocumentAnalysis,
+  onRemoveAnalysisJob,
   onClearCompany,
   onAddDirector,
   onAddShareholder,
@@ -4410,6 +4459,7 @@ function Dashboard({
                   isSaving={isSavingDetail || isSavingCompany}
                   onUploadAnalysisDocuments={onUploadAnalysisDocuments}
                   onApplyDocumentAnalysis={onApplyDocumentAnalysis}
+                  onRemoveAnalysisJob={onRemoveAnalysisJob}
                 />
               ) : workspaceView === 'followUps' ? (
                 <FollowUpsWorkspace tasks={allTasks} onSelectCompany={onSelectCompany} />
@@ -9757,13 +9807,19 @@ function DashboardHome({ stats, companies, allTasks, recentActivity, onAddCompan
   );
 }
 
-function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSaving, onUploadAnalysisDocuments, onApplyDocumentAnalysis }) {
+function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSaving, onUploadAnalysisDocuments, onApplyDocumentAnalysis, onRemoveAnalysisJob }) {
   const [files, setFiles] = useState([]);
   const [selectedJobId, setSelectedJobId] = useState(analysisJobs[0]?.id || '');
   const selectedJob = analysisJobs.find((job) => job.id === selectedJobId) || analysisJobs[0] || null;
 
   useEffect(() => {
-    if (!selectedJobId && analysisJobs[0]?.id) setSelectedJobId(analysisJobs[0].id);
+    if (!analysisJobs.length) {
+      setSelectedJobId('');
+      return;
+    }
+    if (!selectedJobId || !analysisJobs.some((job) => job.id === selectedJobId)) {
+      setSelectedJobId(analysisJobs[0].id);
+    }
   }, [analysisJobs, selectedJobId]);
 
   const submit = (event) => {
@@ -9818,20 +9874,34 @@ function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSav
               </div>
               <div className="max-h-[420px] space-y-2 overflow-y-auto p-3">
                 {analysisJobs.map((job) => (
-                  <button
+                  <div
                     key={job.id}
-                    type="button"
-                    onClick={() => setSelectedJobId(job.id)}
-                    className={`w-full rounded-md border p-3 text-left text-sm ${selectedJob?.id === job.id ? 'border-forest bg-sage/70' : 'border-ink/10 hover:bg-paper'}`}
+                    className={`flex items-start gap-2 rounded-md border p-2 text-sm ${selectedJob?.id === job.id ? 'border-forest bg-sage/70' : 'border-ink/10 hover:bg-paper'}`}
                   >
-                    <div className="flex items-start justify-between gap-3">
-                      <span className="min-w-0">
-                        <span className="block truncate font-semibold">{job.document?.originalFilename || 'Company document'}</span>
-                        <span className="mt-1 block text-xs text-ink/55">{analysisTypeLabel(job.analysisType)}</span>
-                      </span>
-                      <AnalysisStatusBadge status={job.status} />
-                    </div>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedJobId(job.id)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <span className="min-w-0">
+                          <span className="block truncate font-semibold">{job.document?.originalFilename || 'Company document'}</span>
+                          <span className="mt-1 block text-xs text-ink/55">{analysisTypeLabel(job.analysisType)}</span>
+                        </span>
+                        <AnalysisStatusBadge status={job.status} />
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveAnalysisJob(job)}
+                      disabled={!permissions.canDeleteRecords || isSaving}
+                      className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-red-200 text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-ink/10 disabled:text-ink/30"
+                      title={permissions.canDeleteRecords ? 'Remove from intake queue' : 'Only owners and admins can remove intake items'}
+                      aria-label="Remove from intake queue"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
                 ))}
                 {analysisJobs.length === 0 && (
                   <div className="rounded-md border border-ink/10 bg-paper p-4 text-sm leading-6 text-ink/55">
@@ -9891,6 +9961,12 @@ function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApply
     ...form,
     matchedCompanyId: suggestedMatch?.id || null
   };
+  const providerLabel = analysisProviderLabel(form, job);
+  const confidenceItems = [
+    { label: 'AI provider', value: providerLabel },
+    { label: 'Company confidence', value: confidenceLabel(form.confidenceSummary?.company) },
+    { label: 'Director confidence', value: confidenceLabel(form.confidenceSummary?.directors) }
+  ];
 
   return (
     <div className="rounded-md border border-ink/10 bg-white">
@@ -9918,6 +9994,15 @@ function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApply
       )}
 
       <div className="space-y-5 p-5">
+        <div className="grid gap-3 md:grid-cols-3">
+          {confidenceItems.map((item) => (
+            <div key={item.label} className="rounded-md border border-ink/10 bg-paper px-4 py-3">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-ink/50">{item.label}</p>
+              <p className="mt-2 text-sm font-semibold text-ink">{item.value}</p>
+            </div>
+          ))}
+        </div>
+
         {suggestedMatch && (
           <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-900">
             <p className="font-semibold">Possible existing company match</p>
@@ -10029,6 +10114,26 @@ function analysisStatusLabel(status) {
     applied: 'Applied',
     failed: 'Failed'
   }[status] || 'Queued';
+}
+
+function analysisProviderLabel(form, job) {
+  const notes = [
+    ...(Array.isArray(form?.sourceNotes) ? form.sourceNotes : []),
+    ...(Array.isArray(job?.extractedData?.sourceNotes) ? job.extractedData.sourceNotes : []),
+    ...(Array.isArray(job?.reviewedData?.sourceNotes) ? job.reviewedData.sourceNotes : [])
+  ].join(' ').toLowerCase();
+  if (notes.includes('claude')) return 'Claude';
+  if (notes.includes('gemini')) return 'Gemini';
+  if (job?.status === 'review_required' || job?.status === 'applied') return 'AI extracted';
+  return 'Pending';
+}
+
+function confidenceLabel(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (text === 'high') return 'High';
+  if (text === 'medium') return 'Medium';
+  if (text === 'low') return 'Low';
+  return 'Not stated';
 }
 
 function analysisTypeLabel(type) {
