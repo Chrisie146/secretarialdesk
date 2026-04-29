@@ -755,6 +755,12 @@ function App() {
   const runDocumentAnalysis = async (jobId, documentId) => {
     if (!hasSupabaseConfig || !session) return;
     setActiveOperation('Analyzing document with AI...');
+    setAnalysisJobs((current) => current.map((job) => job.id === jobId ? {
+      ...job,
+      status: 'analyzing',
+      errorMessage: '',
+      updatedAt: new Date().toISOString()
+    } : job));
 
     const { data, error } = await supabase.functions.invoke('analyze-document', {
       body: { jobId, documentId }
@@ -781,6 +787,51 @@ function App() {
     }
 
     setAnalysisJobs((current) => current.map((job) => job.id === jobId ? mapAnalysisJobRow(refreshedJob) : job));
+  };
+
+  const retryDocumentAnalysis = async (job) => {
+    if (!job) return;
+    if (!requirePermission(permissions.canEditCompany, 'Your role cannot retry document analysis.')) return;
+    if (job.status === 'applied') {
+      setAppError('Applied analysis jobs cannot be retried. Upload the document again if a new extraction is required.');
+      return;
+    }
+    if (!job.documentId) {
+      setAppError('This analysis job is missing a document reference.');
+      return;
+    }
+
+    if (!hasSupabaseConfig || !session) {
+      const extractedData = createDemoCompanyExtraction(job.document?.originalFilename || 'company-document.pdf', companies.length + 1);
+      setAnalysisJobs((current) => current.map((item) => item.id === job.id ? {
+        ...item,
+        status: 'review_required',
+        extractedData,
+        confidenceSummary: extractedData.confidenceSummary || {},
+        errorMessage: '',
+        updatedAt: new Date().toISOString()
+      } : item));
+      showSuccess('Analysis retried', 'Demo extraction is ready for review.');
+      return;
+    }
+
+    const { error } = await supabase
+      .from('document_analysis_jobs')
+      .update({
+        status: 'queued',
+        error_message: null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', job.id);
+
+    if (error) {
+      setAppError(error.message);
+      return;
+    }
+
+    await runDocumentAnalysis(job.id, job.documentId);
+    setActiveOperation('');
+    showSuccess('Analysis retried', 'Review the latest extracted company information.');
   };
 
   const removeAnalysisJob = async (job) => {
@@ -2896,6 +2947,7 @@ function App() {
             analysisJobs={analysisJobs}
             onUploadAnalysisDocuments={uploadAnalysisDocuments}
             onApplyDocumentAnalysis={applyDocumentAnalysis}
+            onRetryDocumentAnalysis={retryDocumentAnalysis}
             onRemoveAnalysisJob={removeAnalysisJob}
             onClearCompany={() => setSelectedCompany(null)}
             onAddDirector={addDirector}
@@ -4213,6 +4265,7 @@ function Dashboard({
   analysisJobs,
   onUploadAnalysisDocuments,
   onApplyDocumentAnalysis,
+  onRetryDocumentAnalysis,
   onRemoveAnalysisJob,
   onClearCompany,
   onAddDirector,
@@ -4459,6 +4512,7 @@ function Dashboard({
                   isSaving={isSavingDetail || isSavingCompany}
                   onUploadAnalysisDocuments={onUploadAnalysisDocuments}
                   onApplyDocumentAnalysis={onApplyDocumentAnalysis}
+                  onRetryDocumentAnalysis={onRetryDocumentAnalysis}
                   onRemoveAnalysisJob={onRemoveAnalysisJob}
                 />
               ) : workspaceView === 'followUps' ? (
@@ -9807,7 +9861,7 @@ function DashboardHome({ stats, companies, allTasks, recentActivity, onAddCompan
   );
 }
 
-function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSaving, onUploadAnalysisDocuments, onApplyDocumentAnalysis, onRemoveAnalysisJob }) {
+function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSaving, onUploadAnalysisDocuments, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onRemoveAnalysisJob }) {
   const [files, setFiles] = useState([]);
   const [selectedJobId, setSelectedJobId] = useState(analysisJobs[0]?.id || '');
   const selectedJob = analysisJobs.find((job) => job.id === selectedJobId) || analysisJobs[0] || null;
@@ -9918,6 +9972,7 @@ function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSav
             permissions={permissions}
             isSaving={isSaving}
             onApplyDocumentAnalysis={onApplyDocumentAnalysis}
+            onRetryDocumentAnalysis={onRetryDocumentAnalysis}
           />
         </div>
       </section>
@@ -9925,7 +9980,7 @@ function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSav
   );
 }
 
-function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApplyDocumentAnalysis }) {
+function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApplyDocumentAnalysis, onRetryDocumentAnalysis }) {
   const extracted = normalizeCompanyExtraction(job?.reviewedData && Object.keys(job.reviewedData).length ? job.reviewedData : job?.extractedData || {});
   const suggestedMatch = companies.find((company) =>
     normalizeCompanyRegistrationNumber(company.registrationNumber).toLowerCase() ===
@@ -9967,6 +10022,7 @@ function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApply
     { label: 'Company confidence', value: confidenceLabel(form.confidenceSummary?.company) },
     { label: 'Director confidence', value: confidenceLabel(form.confidenceSummary?.directors) }
   ];
+  const canRetry = permissions.canEditCompany && Boolean(job.documentId) && job.status !== 'applied' && job.status !== 'analyzing';
 
   return (
     <div className="rounded-md border border-ink/10 bg-white">
@@ -10001,6 +10057,51 @@ function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApply
               <p className="mt-2 text-sm font-semibold text-ink">{item.value}</p>
             </div>
           ))}
+        </div>
+
+        <div className="rounded-md border border-ink/10 bg-white p-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <p className="text-sm font-semibold">Analysis history</p>
+              <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+                <div>
+                  <dt className="text-xs font-semibold uppercase tracking-[0.14em] text-ink/45">Current status</dt>
+                  <dd className="mt-1">{analysisStatusLabel(job.status)}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-semibold uppercase tracking-[0.14em] text-ink/45">Uploaded document</dt>
+                  <dd className="mt-1 break-words">{job.document?.originalFilename || 'Not captured'}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-semibold uppercase tracking-[0.14em] text-ink/45">Document status</dt>
+                  <dd className="mt-1">{documentStatusLabel(job.document?.status)}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-semibold uppercase tracking-[0.14em] text-ink/45">Last updated</dt>
+                  <dd className="mt-1">{formatDateTime(job.updatedAt || job.createdAt)}</dd>
+                </div>
+              </dl>
+            </div>
+            <button
+              type="button"
+              onClick={() => onRetryDocumentAnalysis(job)}
+              disabled={!canRetry || isSaving}
+              className="rounded-md border border-gold/60 px-4 py-2 text-sm font-semibold text-gold hover:bg-gold/5 disabled:cursor-not-allowed disabled:border-ink/10 disabled:text-ink/30"
+            >
+              Retry analysis
+            </button>
+          </div>
+          {providerLabel === 'Claude' && form.warnings.some((warning) => warning.toLowerCase().includes('fallback')) && (
+            <p className="mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+              Gemini failed on this run and Claude completed the extraction as fallback.
+            </p>
+          )}
+          {job.errorMessage && (
+            <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm leading-6 text-red-800">
+              <p className="font-semibold">Failure reason</p>
+              <p className="mt-1 break-words">{job.errorMessage}</p>
+            </div>
+          )}
         </div>
 
         {suggestedMatch && (
@@ -10134,6 +10235,28 @@ function confidenceLabel(value) {
   if (text === 'medium') return 'Medium';
   if (text === 'low') return 'Low';
   return 'Not stated';
+}
+
+function documentStatusLabel(status) {
+  return {
+    queued: 'Queued',
+    review_required: 'Review required',
+    complete: 'Complete',
+    failed: 'Failed'
+  }[status] || 'Not captured';
+}
+
+function formatDateTime(value) {
+  if (!value) return 'Not captured';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Not captured';
+  return date.toLocaleString('en-ZA', {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
 }
 
 function analysisTypeLabel(type) {
