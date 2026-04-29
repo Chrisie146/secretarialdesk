@@ -3269,13 +3269,13 @@ function AcceptInvitationScreen({ invitations, onAccept, onSkip, error }) {
   );
 }
 
-function BrandMark() {
+function BrandMark({ compactText = false }) {
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex min-w-0 items-center gap-3">
       <div className="grid h-10 w-10 place-items-center rounded-md border border-gold/40 bg-white text-gold shadow-sm">
         <ShieldCheck className="h-6 w-6" />
       </div>
-      <span className="text-2xl font-semibold tracking-normal text-forest">SecretarialDesk</span>
+      <span className={`${compactText ? 'truncate text-xl' : 'text-2xl'} min-w-0 font-semibold tracking-normal text-forest`}>SecretarialDesk</span>
     </div>
   );
 }
@@ -4007,14 +4007,14 @@ function Dashboard({
   return (
     <div className={`min-h-screen overflow-x-hidden lg:grid ${sidebarCollapsed ? 'lg:grid-cols-[88px_minmax(0,1fr)]' : 'lg:grid-cols-[280px_minmax(0,1fr)]'}`}>
       <aside className="hidden min-w-0 border-r border-ink/10 bg-white p-4 lg:block">
-        <div className="mb-8 flex items-center justify-between gap-2">
+        <div className="mb-8 grid grid-cols-[minmax(0,1fr)_40px] items-center gap-2">
           <button onClick={onBack} className="min-w-0 text-left" aria-label="Back to landing">
             {sidebarCollapsed ? (
               <div className="grid h-10 w-10 place-items-center rounded-md border border-gold/40 bg-white text-gold shadow-sm">
                 <ShieldCheck className="h-6 w-6" />
               </div>
             ) : (
-              <BrandMark />
+              <BrandMark compactText />
             )}
           </button>
           <button
@@ -4988,7 +4988,7 @@ function ShareholdersPanel({ shareholders, shareTransactions, contacts, onAddSha
 
   return (
     <div className="space-y-6">
-      <div className="max-w-full overflow-x-auto rounded-md border border-ink/10">
+      <div className="ui-scrollbar max-w-full overflow-x-auto rounded-md border border-ink/10">
         <table className="w-full min-w-[640px] text-left text-sm">
           <thead className="border-b border-ink/10 bg-paper text-xs uppercase tracking-[0.08em] text-ink/50">
             <tr>
@@ -5833,7 +5833,7 @@ function BoRegisterPanel({
         </div>
       </div>
 
-      <div className="max-w-full overflow-x-auto rounded-md border border-ink/10">
+      <div className="ui-scrollbar max-w-full overflow-x-auto rounded-md border border-ink/10">
         <table className="w-full min-w-[780px] text-left text-sm">
           <thead className="border-b border-ink/10 bg-paper text-xs uppercase tracking-[0.08em] text-ink/50">
             <tr>
@@ -6356,7 +6356,12 @@ function BoStatusBadge({ status, label }) {
     review: 'border-amber-200 bg-amber-50 text-amber-800',
     below: 'border-ink/10 bg-white text-ink/55'
   };
-  return <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${styles[status]}`}>{label}</span>;
+  const displayLabel = status === 'resolved' && label?.includes('Look-through') ? 'Complete' : label;
+  return (
+    <span title={label} className={`inline-flex whitespace-nowrap rounded-full border px-3 py-1 text-xs font-semibold ${styles[status]}`}>
+      {displayLabel}
+    </span>
+  );
 }
 
 function ContactsPanel({ contacts, onAddContact, onUpdateContact, onDeleteContact, isSaving }) {
@@ -9835,7 +9840,7 @@ function PracticeSettingsWorkspace({
   };
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
+    <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_440px]">
       <section className="rounded-lg border border-ink/10 bg-white shadow-sm">
         <div className="border-b border-ink/10 px-5 py-5">
           <h3 className="text-xl font-semibold">Practice Settings</h3>
@@ -10038,13 +10043,13 @@ function PracticeSettingsWorkspace({
       <Panel title="Health check">
         <div className="space-y-3">
           {health.map((item) => (
-            <div key={item.label} className="flex gap-3 rounded-md border border-ink/10 bg-white p-3">
+            <div key={item.label} className="flex min-w-0 gap-3 rounded-md border border-ink/10 bg-white p-3">
               <span className={`mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full border ${item.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-red-200 bg-red-50 text-red-700'}`}>
                 {item.ok ? <Check className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
               </span>
-              <div>
+              <div className="min-w-0">
                 <p className="text-sm font-semibold">{item.label}</p>
-                <p className="text-sm leading-6 text-ink/58">{item.detail}</p>
+                <p className="break-words text-sm leading-6 text-ink/58">{item.detail}</p>
               </div>
             </div>
           ))}
@@ -10082,9 +10087,9 @@ function PracticeSettingsWorkspace({
 }
 
 function ProductionQaItem({ item, onToggle }) {
-  const tone = item.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : item.manual ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-red-200 bg-red-50 text-red-900';
+  const tone = item.ok ? 'border-emerald-200 border-l-emerald-500 text-emerald-900' : item.manual ? 'border-amber-200 border-l-amber-500 text-amber-900' : 'border-red-200 border-l-red-500 text-red-900';
   return (
-    <div className={`rounded-md border p-3 ${tone}`}>
+    <div className={`rounded-md border border-l-4 bg-white px-3 py-2.5 ${tone}`}>
       <div className="flex items-start gap-3">
         {item.manual ? (
           <input type="checkbox" checked={item.ok} onChange={onToggle} className="mt-1 h-4 w-4 accent-forest" />
@@ -10093,9 +10098,9 @@ function ProductionQaItem({ item, onToggle }) {
             {item.ok ? <Check className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
           </span>
         )}
-        <div>
+        <div className="min-w-0">
           <p className="text-sm font-semibold">{item.label}</p>
-          <p className="mt-1 text-sm leading-6">{item.detail}</p>
+          <p className="mt-0.5 text-sm leading-5 text-ink/65">{item.detail}</p>
         </div>
       </div>
     </div>
