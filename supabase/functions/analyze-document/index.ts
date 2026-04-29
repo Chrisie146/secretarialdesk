@@ -27,6 +27,7 @@ Deno.serve(async (req) => {
     const anonKey = Deno.env.get('SUPABASE_ANON_KEY');
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
     const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
+    const anthropicApiKey = Deno.env.get('ANTHROPIC_API_KEY');
     const authorization = req.headers.get('Authorization') || '';
 
     if (!supabaseUrl || !anonKey || !serviceRoleKey) {
@@ -54,9 +55,10 @@ Deno.serve(async (req) => {
       .update({ status: 'analyzing', updated_at: new Date().toISOString(), error_message: null })
       .eq('id', jobId);
 
-    if (!geminiApiKey) {
-      await markFailed(supabase, jobId, documentId, 'GEMINI_API_KEY is not configured for the Edge Function.');
-      return jsonResponse({ error: 'GEMINI_API_KEY is not configured for the Edge Function.' }, 500);
+    if (!geminiApiKey && !anthropicApiKey) {
+      const message = 'No AI provider is configured. Add GEMINI_API_KEY or ANTHROPIC_API_KEY to the Edge Function secrets.';
+      await markFailed(supabase, jobId, documentId, message);
+      return jsonResponse({ error: message }, 500);
     }
 
     const { data: documentRecord, error: documentError } = await supabase
@@ -82,7 +84,7 @@ Deno.serve(async (req) => {
     }
 
     const base64 = await blobToBase64(fileData);
-    const extracted = await analyzeWithGemini(geminiApiKey, base64, documentRecord.original_filename || 'company-document.pdf');
+    const extracted = await analyzeDocument(base64, documentRecord.original_filename || 'company-document.pdf');
 
     await supabase
       .from('documents')
@@ -111,8 +113,8 @@ Deno.serve(async (req) => {
   }
 });
 
-async function analyzeWithGemini(apiKey: string, pdfBase64: string, filename: string) {
-  const prompt = `You are extracting company onboarding data for a South African company secretarial compliance app.
+function buildExtractionPrompt(filename: string) {
+  return `You are extracting company onboarding data for a South African company secretarial compliance app.
 Return only valid JSON with this exact shape:
 {
   "company": {
@@ -134,7 +136,52 @@ Return only valid JSON with this exact shape:
   }
 }
 Use South African terminology. Prefer CIPC registration numbers like 2020/123456/07. Leave fields blank when not present. Do not invent IDs, dates or names. Filename: ${filename}`;
+}
 
+async function analyzeDocument(pdfBase64: string, filename: string) {
+  const geminiApiKey = Deno.env.get('GEMINI_API_KEY');
+  const anthropicApiKey = Deno.env.get('ANTHROPIC_API_KEY');
+  const failures: string[] = [];
+
+  if (geminiApiKey) {
+    try {
+      const extracted = await analyzeWithGemini(geminiApiKey, pdfBase64, filename);
+      return {
+        ...extracted,
+        sourceNotes: [
+          ...(Array.isArray(extracted.sourceNotes) ? extracted.sourceNotes : []),
+          'AI provider: Gemini'
+        ]
+      };
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : 'Gemini analysis failed.');
+    }
+  }
+
+  if (anthropicApiKey) {
+    try {
+      const extracted = await analyzeWithClaude(anthropicApiKey, pdfBase64, filename);
+      return {
+        ...extracted,
+        warnings: [
+          ...(Array.isArray(extracted.warnings) ? extracted.warnings : []),
+          ...(failures.length ? ['Gemini analysis failed; Claude fallback was used.'] : [])
+        ],
+        sourceNotes: [
+          ...(Array.isArray(extracted.sourceNotes) ? extracted.sourceNotes : []),
+          'AI provider: Claude'
+        ]
+      };
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : 'Claude analysis failed.');
+    }
+  }
+
+  throw new Error(failures.length ? failures.join(' | ') : 'No configured AI provider could analyze the document.');
+}
+
+async function analyzeWithGemini(apiKey: string, pdfBase64: string, filename: string) {
+  const prompt = buildExtractionPrompt(filename);
   const model = Deno.env.get('GEMINI_MODEL') || 'gemini-2.5-flash-lite';
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
     method: 'POST',
@@ -159,6 +206,47 @@ Use South African terminology. Prefer CIPC registration numbers like 2020/123456
 
   const result = await response.json();
   const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+  return JSON.parse(stripJsonFence(text));
+}
+
+async function analyzeWithClaude(apiKey: string, pdfBase64: string, filename: string) {
+  const prompt = buildExtractionPrompt(filename);
+  const model = Deno.env.get('ANTHROPIC_MODEL') || 'claude-sonnet-4-5';
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 4096,
+      temperature: 0.1,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'document',
+            source: {
+              type: 'base64',
+              media_type: 'application/pdf',
+              data: pdfBase64
+            },
+            title: filename
+          },
+          { type: 'text', text: prompt }
+        ]
+      }]
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Claude analysis failed: ${response.status} ${await response.text()}`);
+  }
+
+  const result = await response.json();
+  const text = result?.content?.find((part: { type?: string; text?: string }) => part.type === 'text')?.text || '{}';
   return JSON.parse(stripJsonFence(text));
 }
 
