@@ -2949,6 +2949,7 @@ function App() {
             onApplyDocumentAnalysis={applyDocumentAnalysis}
             onRetryDocumentAnalysis={retryDocumentAnalysis}
             onRemoveAnalysisJob={removeAnalysisJob}
+            onOpenStoragePath={openStoragePath}
             onClearCompany={() => setSelectedCompany(null)}
             onAddDirector={addDirector}
             onAddShareholder={addShareholder}
@@ -2978,7 +2979,6 @@ function App() {
               onGenerateFilingPack={generateFilingPack}
               onUpdateAnnualReturn={updateAnnualReturn}
               onUpdateFilingPackSubmission={updateFilingPackSubmission}
-              onOpenStoragePath={openStoragePath}
               onUpdateCompanyProfile={updateCompanyProfile}
             onUpdatePracticeName={updatePracticeName}
             onExportPracticeData={exportPracticeData}
@@ -4514,6 +4514,7 @@ function Dashboard({
                   onApplyDocumentAnalysis={onApplyDocumentAnalysis}
                   onRetryDocumentAnalysis={onRetryDocumentAnalysis}
                   onRemoveAnalysisJob={onRemoveAnalysisJob}
+                  onOpenStoragePath={onOpenStoragePath}
                 />
               ) : workspaceView === 'followUps' ? (
                 <FollowUpsWorkspace tasks={allTasks} onSelectCompany={onSelectCompany} />
@@ -9861,7 +9862,7 @@ function DashboardHome({ stats, companies, allTasks, recentActivity, onAddCompan
   );
 }
 
-function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSaving, onUploadAnalysisDocuments, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onRemoveAnalysisJob }) {
+function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSaving, onUploadAnalysisDocuments, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onRemoveAnalysisJob, onOpenStoragePath }) {
   const [files, setFiles] = useState([]);
   const [selectedJobId, setSelectedJobId] = useState(analysisJobs[0]?.id || '');
   const selectedJob = analysisJobs.find((job) => job.id === selectedJobId) || analysisJobs[0] || null;
@@ -9973,6 +9974,7 @@ function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSav
             isSaving={isSaving}
             onApplyDocumentAnalysis={onApplyDocumentAnalysis}
             onRetryDocumentAnalysis={onRetryDocumentAnalysis}
+            onOpenStoragePath={onOpenStoragePath}
           />
         </div>
       </section>
@@ -9980,7 +9982,7 @@ function DocumentAnalyzerWorkspace({ companies, analysisJobs, permissions, isSav
   );
 }
 
-function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApplyDocumentAnalysis, onRetryDocumentAnalysis }) {
+function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onOpenStoragePath }) {
   const extracted = normalizeCompanyExtraction(job?.reviewedData && Object.keys(job.reviewedData).length ? job.reviewedData : job?.extractedData || {});
   const suggestedMatch = companies.find((company) =>
     normalizeCompanyRegistrationNumber(company.registrationNumber).toLowerCase() ===
@@ -10090,6 +10092,19 @@ function DocumentAnalysisReview({ job, companies, permissions, isSaving, onApply
             >
               Retry analysis
             </button>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-3 border-t border-ink/10 pt-4">
+            <button
+              type="button"
+              onClick={() => onOpenStoragePath(job.document.filePath)}
+              disabled={!job.document?.filePath}
+              className="rounded-md border border-forest/30 px-4 py-2 text-sm font-semibold text-forest hover:bg-sage disabled:cursor-not-allowed disabled:border-ink/10 disabled:text-ink/30"
+            >
+              View source PDF
+            </button>
+            <p className="self-center text-xs leading-5 text-ink/55">
+              Opens a short-lived signed link from the private company document bucket.
+            </p>
           </div>
           {providerLabel === 'Claude' && form.warnings.some((warning) => warning.toLowerCase().includes('fallback')) && (
             <p className="mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
