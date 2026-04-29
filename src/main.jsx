@@ -4411,7 +4411,7 @@ function CompanyDetail({
             {activeTab === 'shareholders' ? (
               <ShareholdersPanel shareholders={detail.shareholders} shareTransactions={detail.shareTransactions || []} contacts={detail.contacts || []} onAddShareholder={onAddShareholder} onUpdateShareholder={onUpdateShareholder} onDeleteShareholder={onDeleteShareholder} onSaveShareTransaction={onSaveShareTransaction} onUpdateShareTransactionStatus={onUpdateShareTransactionStatus} onAddTask={onAddTask} isSaving={isSaving || !permissions.canEditCompany} shareTransactionFeature={databaseFeatures?.shareTransactions} />
             ) : activeTab === 'ownershipMap' ? (
-              <OwnershipMapPanel company={company} shareholders={detail.shareholders} />
+              <OwnershipMapPanel company={company} detail={detail} />
             ) : activeTab === 'boRegister' ? (
               <BoRegisterPanel
                 company={company}
@@ -5595,12 +5595,14 @@ function directorChangeNextAction(change) {
   return { label: 'Ready: update director register.', tone: 'text-forest' };
 }
 
-function OwnershipMapPanel({ company, shareholders }) {
+function OwnershipMapPanel({ company, detail }) {
   const [copied, setCopied] = useState(false);
+  const shareholders = detail.shareholders || [];
+  const mapNodes = buildOwnershipMapNodes(detail);
   const ownershipTotal = shareholders.reduce((sum, shareholder) => sum + Number(shareholder.ownershipPercentage || 0), 0);
-  const beneficialOwners = shareholders.filter((shareholder) => shareholder.shareholderType === 'natural_person' && Number(shareholder.ownershipPercentage) > 5);
-  const reviewItems = shareholders.filter((shareholder) => shareholder.shareholderType !== 'natural_person' && Number(shareholder.ownershipPercentage) > 5);
-  const mermaid = buildOwnershipMermaid(company, shareholders);
+  const beneficialOwners = mapNodes.filter((node) => node.status === 'confirmed');
+  const reviewItems = mapNodes.filter((node) => node.status === 'review');
+  const mermaid = buildOwnershipMermaid(company, mapNodes);
 
   const copyMermaid = async () => {
     try {
@@ -5630,12 +5632,12 @@ function OwnershipMapPanel({ company, shareholders }) {
         <div className="rounded-md border border-ink/10 bg-paper p-4">
           <p className="text-xs uppercase tracking-[0.12em] text-ink/45">Beneficial owners</p>
           <p className="mt-2 text-2xl font-semibold text-forest">{beneficialOwners.length}</p>
-          <p className="mt-1 text-sm text-ink/55">Natural persons above 5%</p>
+          <p className="mt-1 text-sm text-ink/55">Resolved BO paths</p>
         </div>
         <div className="rounded-md border border-ink/10 bg-paper p-4">
           <p className="text-xs uppercase tracking-[0.12em] text-ink/45">Review items</p>
           <p className="mt-2 text-2xl font-semibold text-amber-700">{reviewItems.length}</p>
-          <p className="mt-1 text-sm text-ink/55">Trusts or entities above 5%</p>
+          <p className="mt-1 text-sm text-ink/55">Trust/entity paths still open</p>
         </div>
         <div className="rounded-md border border-ink/10 bg-paper p-4">
           <p className="text-xs uppercase tracking-[0.12em] text-ink/45">Ownership total</p>
@@ -5646,7 +5648,7 @@ function OwnershipMapPanel({ company, shareholders }) {
 
       <div className="max-w-full overflow-x-auto rounded-md border border-ink/10 bg-white p-4">
         {shareholders.length ? (
-          <OwnershipMapSvg company={company} shareholders={shareholders} />
+          <OwnershipMapSvg company={company} nodes={mapNodes} />
         ) : (
           <div className="grid min-h-[260px] place-items-center text-center text-sm text-ink/55">
             Add shareholders to generate the ownership map.
@@ -5657,13 +5659,14 @@ function OwnershipMapPanel({ company, shareholders }) {
   );
 }
 
-function OwnershipMapSvg({ company, shareholders }) {
-  const width = 920;
-  const rowHeight = 112;
-  const height = Math.max(300, shareholders.length * rowHeight + 70);
+function OwnershipMapSvg({ company, nodes }) {
+  const width = 1040;
+  const rowHeight = 118;
+  const height = Math.max(300, nodes.length * rowHeight + 70);
   const companyX = 80;
   const companyY = height / 2;
   const shareholderX = 560;
+  const boX = 900;
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="h-auto min-w-[760px] max-w-full" role="img" aria-label="Ownership map">
@@ -5677,17 +5680,28 @@ function OwnershipMapSvg({ company, shareholders }) {
       <text x={companyX} y={companyY + 18} className="fill-ink/60 text-[14px]">{company.registrationNumber}</text>
       <text x={companyX} y={companyY + 42} className="fill-ink/45 text-[12px]">Client company</text>
 
-      {shareholders.map((shareholder, index) => {
+      {nodes.map((node, index) => {
         const y = 58 + index * rowHeight;
-        const style = ownershipNodeStyle(shareholder);
+        const style = ownershipNodeStyle(node);
         return (
-          <g key={shareholder.id}>
+          <g key={node.id}>
             <path d={`M314 ${companyY} C410 ${companyY}, 430 ${y + 46}, ${shareholderX - 12} ${y + 46}`} fill="none" stroke="#9aa1a1" strokeWidth="2" markerEnd="url(#ownership-arrow)" />
-            <text x="392" y={Math.min(companyY, y + 46) + Math.abs(companyY - (y + 46)) / 2 - 8} className="fill-ink/55 text-[13px]">{Number(shareholder.ownershipPercentage || 0)}%</text>
-            <rect x={shareholderX} y={y} width="320" height="92" rx="8" fill={style.fill} stroke={style.stroke} />
-            <text x={shareholderX + 20} y={y + 28} className="fill-ink text-[17px] font-semibold">{truncateSvgText(shareholder.name, 28)}</text>
-            <text x={shareholderX + 20} y={y + 54} className="fill-ink/60 text-[13px]">{shareholderTypeLabel(shareholder.shareholderType)} - {shareholder.idNumber || 'ID/reg not captured'}</text>
-            <text x={shareholderX + 20} y={y + 76} className="text-[13px] font-semibold" fill={style.text}>{style.label}</text>
+            <text x="392" y={Math.min(companyY, y + 46) + Math.abs(companyY - (y + 46)) / 2 - 8} className="fill-ink/55 text-[13px]">{Number(node.ownershipPercentage || 0)}%</text>
+            <rect x={shareholderX} y={y} width="300" height="96" rx="8" fill={style.fill} stroke={style.stroke} />
+            <text x={shareholderX + 20} y={y + 26} className="fill-ink text-[16px] font-semibold">{truncateSvgText(node.name, 26)}</text>
+            <text x={shareholderX + 20} y={y + 51} className="fill-ink/60 text-[13px]">{shareholderTypeLabel(node.shareholderType)} - {node.idNumber || 'ID/reg not captured'}</text>
+            <text x={shareholderX + 20} y={y + 74} className="text-[13px] font-semibold" fill={style.text}>{style.label}</text>
+            {node.beneficialOwners.slice(0, 2).map((owner, ownerIndex) => (
+              <g key={`${node.id}-${owner.id || owner.fullName}-${ownerIndex}`}>
+                <path d={`M860 ${y + 48} C880 ${y + 48}, 882 ${y + 24 + ownerIndex * 40}, ${boX - 12} ${y + 24 + ownerIndex * 40}`} fill="none" stroke="#9aa1a1" strokeWidth="1.5" markerEnd="url(#ownership-arrow)" />
+                <rect x={boX} y={y + 4 + ownerIndex * 40} width="120" height="32" rx="6" fill="#ecfdf5" stroke="#a7f3d0" />
+                <text x={boX + 9} y={y + 17 + ownerIndex * 40} className="fill-ink text-[11px] font-semibold">{truncateSvgText(owner.fullName, 17)}</text>
+                <text x={boX + 9} y={y + 30 + ownerIndex * 40} className="fill-emerald-700 text-[10px]">{Number(owner.ownershipPercentage || owner.effectiveOwnership || 0)}% effective</text>
+              </g>
+            ))}
+            {node.beneficialOwners.length > 2 && (
+              <text x={boX + 9} y={y + 93} className="fill-emerald-700 text-[10px] font-semibold">+{node.beneficialOwners.length - 2} more BO</text>
+            )}
           </g>
         );
       })}
@@ -6640,17 +6654,71 @@ function ShareholderAction({ shareholder }) {
   return <span className="rounded-full border border-ink/10 bg-white px-3 py-1 text-xs font-semibold text-ink/55">Below threshold</span>;
 }
 
-function ownershipNodeStyle(shareholder) {
-  const pct = Number(shareholder.ownershipPercentage || 0);
-  if (shareholder.shareholderType === 'natural_person' && pct > 5) {
+function buildOwnershipMapNodes(detail) {
+  const shareholders = detail.shareholders || [];
+  const beneficialOwners = detail.beneficialOwners || [];
+  const trustReviews = detail.trustReviews || [];
+  const entityOwnershipReviews = detail.entityOwnershipReviews || [];
+  return shareholders.map((shareholder) => {
+    const linkedOwners = beneficialOwners.filter((owner) => String(owner.shareholderId || '') === String(shareholder.id));
+    const trustReview = trustReviews.find((review) => String(review.shareholderId || '') === String(shareholder.id));
+    const entityReview = entityOwnershipReviews.find((review) => String(review.shareholderId || '') === String(shareholder.id));
+    const pct = Number(shareholder.ownershipPercentage || 0);
+    const naturalDirectBo = shareholder.shareholderType === 'natural_person' && pct > 5
+      ? [{
+          id: shareholder.id,
+          fullName: shareholder.name,
+          idNumber: shareholder.idNumber,
+          ownershipPercentage: pct,
+          controlBasis: 'Direct shareholding above 5%'
+        }]
+      : [];
+    const reviewOwners = entityReview
+      ? entityReviewOwnersToBeneficialOwners(entityReview, shareholder)
+      : [];
+    const trustOwners = trustReview
+      ? trustReviewPeopleToOwners(trustReview).filter((owner) => Number(owner.ownershipPercentage || 0) > 5 || linkedOwners.some((linked) => linked.fullName === owner.fullName))
+      : [];
+    const resolvedOwners = linkedOwners.length ? linkedOwners : [...naturalDirectBo, ...reviewOwners, ...trustOwners];
+    const status = resolvedOwners.length
+      ? 'confirmed'
+      : shareholder.shareholderType !== 'natural_person' && pct > 5 && (trustReview || entityReview)
+        ? 'pendingRecords'
+        : shareholder.shareholderType !== 'natural_person' && pct > 5
+          ? 'review'
+          : naturalDirectBo.length
+            ? 'confirmed'
+            : 'below';
+
+    return {
+      ...shareholder,
+      beneficialOwners: resolvedOwners,
+      hasTrustReview: Boolean(trustReview),
+      hasEntityReview: Boolean(entityReview),
+      status
+    };
+  });
+}
+
+function ownershipNodeStyle(node) {
+  const pct = Number(node.ownershipPercentage || 0);
+  if (node.status === 'confirmed') {
     return {
       fill: '#ecfdf5',
       stroke: '#a7f3d0',
       text: '#047857',
-      label: 'Beneficial owner'
+      label: node.shareholderType === 'natural_person' ? 'Beneficial owner' : 'Look-through complete'
     };
   }
-  if (shareholder.shareholderType === 'trust') {
+  if (node.status === 'pendingRecords') {
+    return {
+      fill: '#eff6ff',
+      stroke: '#bfdbfe',
+      text: '#1d4ed8',
+      label: 'Create BO filing records'
+    };
+  }
+  if (node.shareholderType === 'trust') {
     return {
       fill: '#fffbeb',
       stroke: '#fde68a',
@@ -6658,7 +6726,7 @@ function ownershipNodeStyle(shareholder) {
       label: pct > 5 ? 'Trust Deed required' : 'Trust review'
     };
   }
-  if (shareholder.shareholderType === 'company' && pct > 5) {
+  if (node.shareholderType === 'company' && pct > 5) {
     return {
       fill: '#fffbeb',
       stroke: '#fde68a',
@@ -6674,13 +6742,18 @@ function ownershipNodeStyle(shareholder) {
   };
 }
 
-function buildOwnershipMermaid(company, shareholders) {
+function buildOwnershipMermaid(company, nodes) {
   const lines = ['flowchart LR', `  C["${escapeMermaidLabel(company.name)}<br/>${escapeMermaidLabel(company.registrationNumber)}"]`];
-  shareholders.forEach((shareholder, index) => {
+  nodes.forEach((node, index) => {
     const nodeId = `S${index + 1}`;
-    const style = ownershipNodeStyle(shareholder);
-    lines.push(`  ${nodeId}["${escapeMermaidLabel(shareholder.name)}<br/>${Number(shareholder.ownershipPercentage || 0)}%<br/>${escapeMermaidLabel(style.label)}"]`);
-    lines.push(`  C -->|${Number(shareholder.ownershipPercentage || 0)}%| ${nodeId}`);
+    const style = ownershipNodeStyle(node);
+    lines.push(`  ${nodeId}["${escapeMermaidLabel(node.name)}<br/>${Number(node.ownershipPercentage || 0)}%<br/>${escapeMermaidLabel(style.label)}"]`);
+    lines.push(`  C -->|${Number(node.ownershipPercentage || 0)}%| ${nodeId}`);
+    node.beneficialOwners.forEach((owner, ownerIndex) => {
+      const ownerNodeId = `${nodeId}BO${ownerIndex + 1}`;
+      lines.push(`  ${ownerNodeId}["${escapeMermaidLabel(owner.fullName)}<br/>${Number(owner.ownershipPercentage || owner.effectiveOwnership || 0)}% effective<br/>Confirmed BO"]`);
+      lines.push(`  ${nodeId} --> ${ownerNodeId}`);
+    });
   });
   return lines.join('\n');
 }
