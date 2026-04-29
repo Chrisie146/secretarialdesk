@@ -5674,12 +5674,29 @@ function OwnershipMapPanel({ company, detail }) {
 
 function OwnershipMapSvg({ company, nodes }) {
   const width = 1040;
-  const rowHeight = 118;
-  const height = Math.max(300, nodes.length * rowHeight + 70);
-  const companyX = 80;
-  const companyY = height / 2;
-  const shareholderX = 560;
-  const boX = 900;
+  const nodeWidth = 300;
+  const companyWidth = 340;
+  const columns = nodes.length <= 1 ? 1 : nodes.length === 2 ? 2 : 3;
+  const gapX = 36;
+  const startX = (width - (columns * nodeWidth + (columns - 1) * gapX)) / 2;
+  const shareholderTop = 190;
+  const rows = Math.max(1, Math.ceil(nodes.length / columns));
+  const rowHeights = Array.from({ length: rows }, (_, rowIndex) => {
+    const rowNodes = nodes.filter((_, nodeIndex) => Math.floor(nodeIndex / columns) === rowIndex);
+    const displayedOwners = Math.max(0, ...rowNodes.map((node) => Math.min(node.beneficialOwners.length, 2)));
+    const hasMoreOwners = rowNodes.some((node) => node.beneficialOwners.length > 2);
+    if (hasMoreOwners) return 270;
+    if (displayedOwners > 1) return 250;
+    if (displayedOwners === 1) return 204;
+    return 132;
+  });
+  const rowTops = rowHeights.reduce((tops, rowHeight, rowIndex) => {
+    tops.push(rowIndex === 0 ? shareholderTop : tops[rowIndex - 1] + rowHeights[rowIndex - 1]);
+    return tops;
+  }, []);
+  const height = Math.max(420, shareholderTop + rowHeights.reduce((sum, rowHeight) => sum + rowHeight, 0) + 50);
+  const companyX = (width - companyWidth) / 2;
+  const companyY = 34;
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" className="block h-auto w-full max-w-full" role="img" aria-label="Ownership map">
@@ -5688,32 +5705,38 @@ function OwnershipMapSvg({ company, nodes }) {
           <path d="M0,0 L0,6 L9,3 z" fill="#6f7777" />
         </marker>
       </defs>
-      <rect x="24" y={companyY - 54} width="290" height="108" rx="8" fill="#f6f4ef" stroke="#d9d4ca" />
-      <text x={companyX} y={companyY - 12} className="fill-ink text-[20px] font-semibold">{truncateSvgText(company.name, 24)}</text>
-      <text x={companyX} y={companyY + 18} className="fill-ink/60 text-[14px]">{company.registrationNumber}</text>
-      <text x={companyX} y={companyY + 42} className="fill-ink/45 text-[12px]">Client company</text>
+      <rect x={companyX} y={companyY} width={companyWidth} height="108" rx="8" fill="#f6f4ef" stroke="#d9d4ca" />
+      <text x={companyX + 24} y={companyY + 38} className="fill-ink text-[20px] font-semibold">{truncateSvgText(company.name, 28)}</text>
+      <text x={companyX + 24} y={companyY + 68} className="fill-ink/60 text-[14px]">{company.registrationNumber}</text>
+      <text x={companyX + 24} y={companyY + 92} className="fill-ink/45 text-[12px]">Client company</text>
 
       {nodes.map((node, index) => {
-        const y = 58 + index * rowHeight;
+        const col = index % columns;
+        const row = Math.floor(index / columns);
+        const x = startX + col * (nodeWidth + gapX);
+        const y = rowTops[row];
+        const sourceX = companyX + companyWidth / 2;
+        const sourceY = companyY + 108;
+        const targetX = x + nodeWidth / 2;
         const style = ownershipNodeStyle(node);
         return (
           <g key={node.id}>
-            <path d={`M314 ${companyY} C410 ${companyY}, 430 ${y + 46}, ${shareholderX - 12} ${y + 46}`} fill="none" stroke="#9aa1a1" strokeWidth="2" markerEnd="url(#ownership-arrow)" />
-            <text x="392" y={Math.min(companyY, y + 46) + Math.abs(companyY - (y + 46)) / 2 - 8} className="fill-ink/55 text-[13px]">{Number(node.ownershipPercentage || 0)}%</text>
-            <rect x={shareholderX} y={y} width="300" height="96" rx="8" fill={style.fill} stroke={style.stroke} />
-            <text x={shareholderX + 20} y={y + 26} className="fill-ink text-[16px] font-semibold">{truncateSvgText(node.name, 26)}</text>
-            <text x={shareholderX + 20} y={y + 51} className="fill-ink/60 text-[13px]">{shareholderTypeLabel(node.shareholderType)} - {node.idNumber || 'ID/reg not captured'}</text>
-            <text x={shareholderX + 20} y={y + 74} className="text-[13px] font-semibold" fill={style.text}>{style.label}</text>
+            <path d={`M${sourceX} ${sourceY} C${sourceX} ${sourceY + 34}, ${targetX} ${y - 46}, ${targetX} ${y - 12}`} fill="none" stroke="#9aa1a1" strokeWidth="2" markerEnd="url(#ownership-arrow)" />
+            <text x={targetX - 14} y={y - 28} className="fill-ink/55 text-[13px]">{Number(node.ownershipPercentage || 0)}%</text>
+            <rect x={x} y={y} width={nodeWidth} height="96" rx="8" fill={style.fill} stroke={style.stroke} />
+            <text x={x + 20} y={y + 26} className="fill-ink text-[16px] font-semibold">{truncateSvgText(node.name, 26)}</text>
+            <text x={x + 20} y={y + 51} className="fill-ink/60 text-[13px]">{shareholderTypeLabel(node.shareholderType)} - {node.idNumber || 'ID/reg not captured'}</text>
+            <text x={x + 20} y={y + 74} className="text-[13px] font-semibold" fill={style.text}>{style.label}</text>
             {node.beneficialOwners.slice(0, 2).map((owner, ownerIndex) => (
               <g key={`${node.id}-${owner.id || owner.fullName}-${ownerIndex}`}>
-                <path d={`M860 ${y + 48} C880 ${y + 48}, 882 ${y + 24 + ownerIndex * 40}, ${boX - 12} ${y + 24 + ownerIndex * 40}`} fill="none" stroke="#9aa1a1" strokeWidth="1.5" markerEnd="url(#ownership-arrow)" />
-                <rect x={boX} y={y + 4 + ownerIndex * 40} width="120" height="32" rx="6" fill="#ecfdf5" stroke="#a7f3d0" />
-                <text x={boX + 9} y={y + 17 + ownerIndex * 40} className="fill-ink text-[11px] font-semibold">{truncateSvgText(owner.fullName, 17)}</text>
-                <text x={boX + 9} y={y + 30 + ownerIndex * 40} className="fill-emerald-700 text-[10px]">{Number(owner.ownershipPercentage || owner.effectiveOwnership || 0)}% effective</text>
+                <path d={`M${targetX} ${y + 96} C${targetX} ${y + 112}, ${targetX} ${y + 112 + ownerIndex * 44}, ${targetX} ${y + 126 + ownerIndex * 44}`} fill="none" stroke="#9aa1a1" strokeWidth="1.5" markerEnd="url(#ownership-arrow)" />
+                <rect x={x + 42} y={y + 132 + ownerIndex * 44} width="216" height="36" rx="6" fill="#ecfdf5" stroke="#a7f3d0" />
+                <text x={x + 56} y={y + 147 + ownerIndex * 44} className="fill-ink text-[11px] font-semibold">{truncateSvgText(owner.fullName, 26)}</text>
+                <text x={x + 56} y={y + 161 + ownerIndex * 44} className="fill-emerald-700 text-[10px]">{Number(owner.ownershipPercentage || owner.effectiveOwnership || 0)}% effective BO</text>
               </g>
             ))}
             {node.beneficialOwners.length > 2 && (
-              <text x={boX + 9} y={y + 93} className="fill-emerald-700 text-[10px] font-semibold">+{node.beneficialOwners.length - 2} more BO</text>
+              <text x={x + 56} y={y + 219} className="fill-emerald-700 text-[10px] font-semibold">+{node.beneficialOwners.length - 2} more BO</text>
             )}
           </g>
         );
