@@ -5659,7 +5659,7 @@ function OwnershipMapPanel({ company, detail }) {
         </div>
       </div>
 
-      <div className="ui-scrollbar max-w-full overflow-x-auto rounded-lg border border-ink/10 bg-paper/35 p-4 shadow-inner">
+      <div className="max-w-full overflow-hidden rounded-lg border border-ink/10 bg-paper/35 p-4 shadow-inner">
         {shareholders.length ? (
           <OwnershipMapSvg company={company} nodes={mapNodes} />
         ) : (
@@ -5682,7 +5682,7 @@ function OwnershipMapSvg({ company, nodes }) {
   const boX = 900;
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="h-auto min-w-[760px] max-w-full" role="img" aria-label="Ownership map">
+    <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" className="block h-auto w-full max-w-full" role="img" aria-label="Ownership map">
       <defs>
         <marker id="ownership-arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
           <path d="M0,0 L0,6 L9,3 z" fill="#6f7777" />
