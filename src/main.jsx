@@ -39,7 +39,7 @@ const STORAGE_KEYS = {
   selectedCompanyId: 'secretarialdesk.selectedCompanyId'
 };
 
-const VALID_WORKSPACE_VIEWS = ['dashboard', 'companies', 'deadlines', 'documents', 'filingPack', 'followUps', 'settings'];
+const VALID_WORKSPACE_VIEWS = ['dashboard', 'companies', 'deadlines', 'trusts', 'documents', 'filingPack', 'followUps', 'settings'];
 
 function readStoredValue(key) {
   try {
@@ -334,6 +334,8 @@ function App() {
   const [practiceMembers, setPracticeMembers] = useState([]);
   const [practiceInvitations, setPracticeInvitations] = useState([]);
   const [analysisJobs, setAnalysisJobs] = useState([]);
+  const [trustProfiles, setTrustProfiles] = useState([]);
+  const [trustProfileReviews, setTrustProfileReviews] = useState([]);
   const [pendingInvitations, setPendingInvitations] = useState([]);
   const [currentUserRole, setCurrentUserRole] = useState(hasSupabaseConfig ? 'read_only' : 'owner');
   const [databaseFeatures, setDatabaseFeatures] = useState(createDefaultDatabaseFeatures());
@@ -384,6 +386,8 @@ function App() {
         setCompanyDetails(initialCompanyDetails);
         setPracticeActivity(buildRecentActivity(initialCompanies, initialCompanyDetails));
         setAnalysisJobs([]);
+        setTrustProfiles([]);
+        setTrustProfileReviews([]);
         setSelectedCompany(null);
         writeStoredValue(STORAGE_KEYS.selectedCompanyId, null);
         setDatabaseFeatures(createDefaultDatabaseFeatures());
@@ -576,6 +580,26 @@ function App() {
       setAnalysisJobs((analysisRows || []).map(mapAnalysisJobRow));
     }
 
+    const { data: trustProfileRows, error: trustProfilesError } = await supabase
+      .from('trust_profiles')
+      .select('id, practice_id, name, registration_number, master_reference, notes, created_at, updated_at')
+      .eq('practice_id', practiceRecord.id)
+      .order('name', { ascending: true });
+
+    if (!trustProfilesError) {
+      const mappedTrustProfiles = (trustProfileRows || []).map(mapTrustProfileRow);
+      setTrustProfiles(mappedTrustProfiles);
+      if (mappedTrustProfiles.length) {
+        const { data: standaloneReviews, error: standaloneReviewsError } = await supabase
+          .from('trust_reviews')
+          .select('id, shareholder_id, trust_profile_id, trustees, beneficiaries, founders, controllers, notes, reviewed_at, created_at')
+          .in('trust_profile_id', mappedTrustProfiles.map((trust) => trust.id));
+        if (!standaloneReviewsError) {
+          setTrustProfileReviews((standaloneReviews || []).map(mapTrustReviewRow));
+        }
+      }
+    }
+
     const { data: companyRows, error: companiesError } = await supabase
       .from('company_profiles')
       .select('id, name, registration_number, company_type, compliance_status, next_due_date, incorporation_date, registered_address, shareholders(id)')
@@ -588,8 +612,52 @@ function App() {
       return;
     }
 
-    setCompanies(companyRows.map(mapCompanyRow));
+    const mappedCompanies = companyRows.map(mapCompanyRow);
+    setCompanies(mappedCompanies);
+    const companyIds = mappedCompanies.map((company) => company.id);
+    if (companyIds.length) {
+      await loadPracticeTrustData(companyIds);
+    }
     setIsLoading(false);
+  };
+
+  const loadPracticeTrustData = async (companyIds) => {
+    const [
+      { data: trustShareholderRows, error: trustShareholdersError },
+      { data: trustReviewRows, error: trustReviewsError },
+      { data: trustDocumentRows, error: trustDocumentsError }
+    ] = await Promise.all([
+      supabase
+        .from('shareholders')
+        .select('id, company_id, shareholder_type, name, id_number, ownership_percentage, trust_profile_id')
+        .in('company_id', companyIds)
+        .eq('shareholder_type', 'trust'),
+      supabase
+        .from('trust_reviews')
+        .select('id, company_id, shareholder_id, trust_profile_id, trustees, beneficiaries, founders, controllers, notes, reviewed_at, created_at')
+        .in('company_id', companyIds),
+      supabase
+        .from('documents')
+        .select('id, company_id, document_type, original_filename, file_path, status, extracted_data')
+        .in('company_id', companyIds)
+        .eq('document_type', 'trust_deed')
+    ]);
+
+    if (trustShareholdersError || trustReviewsError || trustDocumentsError) return;
+
+    setCompanyDetails((current) => {
+      const next = { ...current };
+      for (const companyId of companyIds) {
+        const existing = next[companyId] || createEmptyCompanyDetail();
+        next[companyId] = {
+          ...existing,
+          shareholders: mergeById(existing.shareholders || [], (trustShareholderRows || []).filter((row) => row.company_id === companyId).map(mapShareholderRow)),
+          trustReviews: mergeById(existing.trustReviews || [], (trustReviewRows || []).filter((row) => row.company_id === companyId).map(mapTrustReviewRow)),
+          documents: mergeById(existing.documents || [], (trustDocumentRows || []).filter((row) => row.company_id === companyId).map(mapDocumentRow))
+        };
+      }
+      return next;
+    });
   };
 
   const acceptInvitation = async (invitation) => {
@@ -634,6 +702,55 @@ function App() {
     if (allowed) return true;
     setAppError(message);
     return false;
+  };
+
+  const addTrustProfile = async (profile) => {
+    if (!requirePermission(permissions.canEditBoRecords, 'Your role cannot add trust profiles.')) return;
+    const normalized = {
+      name: String(profile.name || '').trim(),
+      registrationNumber: String(profile.registrationNumber || '').trim(),
+      masterReference: String(profile.masterReference || '').trim(),
+      notes: String(profile.notes || '').trim()
+    };
+    if (!normalized.name) {
+      setAppError('Trust name is required.');
+      return;
+    }
+
+    if (hasSupabaseConfig && session && practice) {
+      setIsSavingDetail(true);
+      const { data, error } = await supabase
+        .from('trust_profiles')
+        .insert({
+          practice_id: practice.id,
+          name: normalized.name,
+          registration_number: normalized.registrationNumber || null,
+          master_reference: normalized.masterReference || null,
+          notes: normalized.notes || null,
+          created_by: session.user.id
+        })
+        .select('id, practice_id, name, registration_number, master_reference, notes, created_at, updated_at')
+        .single();
+      setIsSavingDetail(false);
+
+      if (error) {
+        setAppError(error.message);
+        return;
+      }
+      setTrustProfiles((current) => [mapTrustProfileRow(data), ...current]);
+      showSuccess('Trust added', `${data.name} was added to the trust register.`);
+      return;
+    }
+
+    const localProfile = {
+      id: `trust-profile-${Date.now()}`,
+      practiceId: 'demo',
+      ...normalized,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    setTrustProfiles((current) => [localProfile, ...current]);
+    showSuccess('Trust added', `${localProfile.name} was added to the trust register.`);
   };
 
   const addCompany = async (company) => {
@@ -693,7 +810,7 @@ function App() {
     showSuccess('Company added', `${nextCompany.name} is now in your compliance workspace.`);
   };
 
-  const uploadAnalysisDocuments = async ({ files, analysisType = 'company_onboarding', companyId = null, shareholderId = null }) => {
+  const uploadAnalysisDocuments = async ({ files, analysisType = 'company_onboarding', companyId = null, shareholderId = null, trustProfileId = null }) => {
     if (!requirePermission(permissions.canEditCompany, 'Your role cannot analyze company documents.')) return;
     const fileList = Array.from(files || []).filter(Boolean);
     if (!fileList.length) {
@@ -714,7 +831,7 @@ function App() {
           analysisType,
           status: 'review_required',
           extractedData,
-          reviewedData: shareholderId ? { shareholderId } : {},
+          reviewedData: { ...(shareholderId ? { shareholderId } : {}), ...(trustProfileId ? { trustProfileId } : {}) },
           confidenceSummary: extractedData.confidenceSummary || {},
           errorMessage: '',
           createdAt: new Date().toISOString(),
@@ -777,7 +894,7 @@ function App() {
           document_id: documentRow.id,
           analysis_type: analysisType,
           status: 'queued',
-          reviewed_data: shareholderId ? { shareholderId } : {},
+          reviewed_data: { ...(shareholderId ? { shareholderId } : {}), ...(trustProfileId ? { trustProfileId } : {}) },
           created_by: session.user.id
         })
         .select('id, practice_id, company_id, document_id, analysis_type, status, extracted_data, reviewed_data, confidence_summary, error_message, created_at, updated_at, documents(id, document_type, original_filename, file_path, status)')
@@ -848,7 +965,9 @@ function App() {
     }
 
     if (!hasSupabaseConfig || !session) {
-      const extractedData = createDemoCompanyExtraction(job.document?.originalFilename || 'company-document.pdf', companies.length + 1);
+      const extractedData = job.analysisType === 'trust_deed'
+        ? createDemoTrustExtraction(job.document?.originalFilename || 'trust-deed.pdf')
+        : createDemoCompanyExtraction(job.document?.originalFilename || 'company-document.pdf', companies.length + 1);
       setAnalysisJobs((current) => current.map((item) => item.id === job.id ? {
         ...item,
         status: 'review_required',
@@ -949,17 +1068,25 @@ function App() {
   const applyTrustDeedAnalysis = async (job, reviewedData) => {
     if (!requirePermission(permissions.canEditBoRecords, 'Your role cannot save trust reviews.')) return;
     const normalized = normalizeTrustExtraction(reviewedData);
-    const companyId = job.companyId;
+    const companyId = job.companyId || null;
     const shareholderId = normalized.shareholderId || job.reviewedData?.shareholderId;
-    if (!companyId || !shareholderId) {
-      setAppError('Select a company and trust shareholder before applying Trust Deed analysis.');
+    const trustProfileId = normalized.trustProfileId || job.reviewedData?.trustProfileId;
+    if (!shareholderId && !trustProfileId) {
+      setAppError('Select a trust shareholder or standalone trust before applying Trust Deed analysis.');
       return;
     }
 
-    const currentDetail = companyDetails[companyId] || createEmptyCompanyDetail();
-    const existingReview = currentDetail.trustReviews.find((item) => String(item.shareholderId) === String(shareholderId));
+    const currentDetail = companyId ? companyDetails[companyId] || createEmptyCompanyDetail() : createEmptyCompanyDetail();
+    const existingReview = [
+      ...(currentDetail.trustReviews || []),
+      ...(trustProfileId ? trustProfileReviews : [])
+    ].find((item) =>
+      (shareholderId && String(item.shareholderId) === String(shareholderId)) ||
+      (trustProfileId && String(item.trustProfileId) === String(trustProfileId))
+    );
     const payload = {
       shareholderId,
+      trustProfileId,
       trustees: normalized.trustees,
       beneficiaries: normalized.beneficiaries,
       founders: normalized.founders,
@@ -979,8 +1106,9 @@ function App() {
           reviewed_at: new Date().toISOString()
         }).eq('id', existingReview.id)
         : supabase.from('trust_reviews').insert({
-          company_id: companyId,
+          company_id: companyId || null,
           shareholder_id: isUuid(shareholderId) ? shareholderId : null,
+          trust_profile_id: isUuid(trustProfileId) ? trustProfileId : null,
           trustees: payload.trustees,
           beneficiaries: payload.beneficiaries,
           founders: payload.founders,
@@ -989,7 +1117,7 @@ function App() {
         });
 
       const { data, error } = await query
-        .select('id, shareholder_id, trustees, beneficiaries, founders, controllers, notes, reviewed_at, created_at')
+        .select('id, shareholder_id, trust_profile_id, trustees, beneficiaries, founders, controllers, notes, reviewed_at, created_at')
         .single();
 
       if (error) {
@@ -1000,20 +1128,30 @@ function App() {
 
       await supabase.from('documents').update({ status: 'complete', extracted_data: normalized }).eq('id', job.documentId);
       await supabase.from('document_analysis_jobs').update({
+        company_id: companyId,
         status: 'applied',
         reviewed_data: normalized,
         updated_at: new Date().toISOString()
       }).eq('id', job.id);
 
       const mappedReview = mapTrustReviewRow(data);
-      setCompanyDetails((current) => {
-        const existing = current[companyId] || createEmptyCompanyDetail();
-        const reviews = existingReview
-          ? existing.trustReviews.map((item) => String(item.id) === String(existingReview.id) ? mappedReview : item)
-          : [mappedReview, ...existing.trustReviews];
-        const documents = job.document ? [{ ...job.document, companyId, status: 'complete', extractedData: normalized }, ...(existing.documents || [])] : existing.documents;
-        return { ...current, [companyId]: { ...existing, trustReviews: reviews, documents } };
-      });
+      if (companyId) {
+        setCompanyDetails((current) => {
+          const existing = current[companyId] || createEmptyCompanyDetail();
+          const reviews = existingReview
+            ? existing.trustReviews.map((item) => String(item.id) === String(existingReview.id) ? mappedReview : item)
+            : [mappedReview, ...existing.trustReviews];
+          const documents = job.document ? [{ ...job.document, companyId, status: 'complete', extractedData: normalized }, ...(existing.documents || [])] : existing.documents;
+          return { ...current, [companyId]: { ...existing, trustReviews: reviews, documents } };
+        });
+      } else {
+        setTrustProfileReviews((current) => {
+          const exists = current.some((item) => String(item.id) === String(mappedReview.id));
+          return exists
+            ? current.map((item) => String(item.id) === String(mappedReview.id) ? mappedReview : item)
+            : [mappedReview, ...current];
+        });
+      }
       updateAnalysisJobApplied(job.id, companyId, normalized);
       setActiveOperation('');
       showSuccess('Trust review saved', 'Trust Deed people were saved to the company BO review.');
@@ -1021,13 +1159,15 @@ function App() {
     }
 
     const localReview = { id: existingReview?.id || Date.now(), ...payload, reviewedAt: new Date().toISOString() };
-    setCompanyDetails((current) => {
-      const existing = current[companyId] || createEmptyCompanyDetail();
-      const reviews = existingReview
-        ? existing.trustReviews.map((item) => String(item.id) === String(existingReview.id) ? localReview : item)
-        : [localReview, ...existing.trustReviews];
-      return { ...current, [companyId]: { ...existing, trustReviews: reviews } };
-    });
+    if (companyId) {
+      setCompanyDetails((current) => {
+        const existing = current[companyId] || createEmptyCompanyDetail();
+        const reviews = existingReview
+          ? existing.trustReviews.map((item) => String(item.id) === String(existingReview.id) ? localReview : item)
+          : [localReview, ...existing.trustReviews];
+        return { ...current, [companyId]: { ...existing, trustReviews: reviews } };
+      });
+    }
     updateAnalysisJobApplied(job.id, companyId, normalized);
     showSuccess('Trust review saved', 'Trust Deed people were saved to the company BO review.');
   };
@@ -1562,7 +1702,7 @@ function App() {
       supabase.from('directors').select('id, full_name, id_number, appointment_date').eq('company_id', company.id).order('created_at', { ascending: false }),
       supabase.from('shareholders').select('id, shareholder_type, name, id_number, ownership_percentage').eq('company_id', company.id).order('created_at', { ascending: false }),
       supabase.from('beneficial_owners').select('id, shareholder_id, full_name, id_number, ownership_percentage, control_basis, notes, created_at').eq('company_id', company.id).order('created_at', { ascending: false }),
-      supabase.from('trust_reviews').select('id, shareholder_id, trustees, beneficiaries, founders, controllers, notes, reviewed_at, created_at').eq('company_id', company.id).order('reviewed_at', { ascending: false }),
+      supabase.from('trust_reviews').select('id, shareholder_id, trust_profile_id, trustees, beneficiaries, founders, controllers, notes, reviewed_at, created_at').eq('company_id', company.id).order('reviewed_at', { ascending: false }),
       supabase.from('entity_ownership_reviews').select('id, shareholder_id, owners, notes, reviewed_at, created_at').eq('company_id', company.id).order('reviewed_at', { ascending: false }),
       supabase.from('documents').select('id, document_type, original_filename, file_path, status').eq('company_id', company.id).order('created_at', { ascending: false }),
       supabase.from('company_contacts').select('id, full_name, role, email, phone, notes').eq('company_id', company.id).order('created_at', { ascending: false }),
@@ -3101,10 +3241,13 @@ function App() {
             onSelectCompany={selectCompany}
             onImportCompanies={importCompanies}
             analysisJobs={analysisJobs}
+            trustProfiles={trustProfiles}
+            trustProfileReviews={trustProfileReviews}
             onUploadAnalysisDocuments={uploadAnalysisDocuments}
             onApplyDocumentAnalysis={applyDocumentAnalysis}
             onRetryDocumentAnalysis={retryDocumentAnalysis}
             onRemoveAnalysisJob={removeAnalysisJob}
+            onAddTrustProfile={addTrustProfile}
             onOpenStoragePath={openStoragePath}
             onClearCompany={clearSelectedCompany}
             onAddDirector={addDirector}
@@ -3244,7 +3387,8 @@ function mapShareholderRow(row) {
     shareholderType: normaliseShareholderType(row.shareholder_type) || row.shareholder_type,
     name: row.name,
     idNumber: row.id_number || '',
-    ownershipPercentage: Number(row.ownership_percentage || 0)
+    ownershipPercentage: Number(row.ownership_percentage || 0),
+    trustProfileId: row.trust_profile_id || ''
   };
 }
 
@@ -3265,6 +3409,7 @@ function mapTrustReviewRow(row) {
   return {
     id: row.id,
     shareholderId: row.shareholder_id || '',
+    trustProfileId: row.trust_profile_id || '',
     trustees: Array.isArray(row.trustees) ? row.trustees : [],
     beneficiaries: Array.isArray(row.beneficiaries) ? row.beneficiaries : [],
     founders: Array.isArray(row.founders) ? row.founders : [],
@@ -3272,6 +3417,19 @@ function mapTrustReviewRow(row) {
     notes: row.notes || '',
     reviewedAt: row.reviewed_at || '',
     createdAt: row.created_at || ''
+  };
+}
+
+function mapTrustProfileRow(row) {
+  return {
+    id: row.id,
+    practiceId: row.practice_id,
+    name: row.name,
+    registrationNumber: row.registration_number || '',
+    masterReference: row.master_reference || '',
+    notes: row.notes || '',
+    createdAt: row.created_at || '',
+    updatedAt: row.updated_at || ''
   };
 }
 
@@ -3314,6 +3472,13 @@ function mapAnalysisJobRow(row) {
     updatedAt: row.updated_at || '',
     document: document ? mapDocumentRow(document) : null
   };
+}
+
+function mergeById(existing = [], incoming = []) {
+  const map = new Map();
+  existing.forEach((item) => map.set(String(item.id), item));
+  incoming.forEach((item) => map.set(String(item.id), item));
+  return Array.from(map.values());
 }
 
 function mapContactRow(row) {
@@ -4420,10 +4585,13 @@ function Dashboard({
   onSelectCompany,
   onImportCompanies,
   analysisJobs,
+  trustProfiles,
+  trustProfileReviews,
   onUploadAnalysisDocuments,
   onApplyDocumentAnalysis,
   onRetryDocumentAnalysis,
   onRemoveAnalysisJob,
+  onAddTrustProfile,
   onClearCompany,
   onAddDirector,
   onAddShareholder,
@@ -4525,6 +4693,7 @@ function Dashboard({
           <NavItem compact={sidebarCollapsed} active={workspaceView === 'dashboard' && !selectedCompany} icon={<LayoutDashboard />} label="Dashboard" onClick={() => { setWorkspaceView('dashboard'); onClearCompany(); }} />
           <NavItem compact={sidebarCollapsed} active={workspaceView === 'companies'} icon={<Building2 />} label="Companies" onClick={() => { setWorkspaceView('companies'); onClearCompany(); }} />
           <NavItem compact={sidebarCollapsed} active={workspaceView === 'deadlines'} icon={<CalendarDays />} label="Deadlines" onClick={() => { setWorkspaceView('deadlines'); onClearCompany(); }} />
+          <NavItem compact={sidebarCollapsed} active={workspaceView === 'trusts'} icon={<ShieldCheck />} label="Trusts" onClick={() => { setWorkspaceView('trusts'); onClearCompany(); }} />
           <NavItem compact={sidebarCollapsed} active={workspaceView === 'documents'} icon={<Upload />} label="AI Document Analyzer" onClick={() => { setWorkspaceView('documents'); onClearCompany(); }} />
           <NavItem compact={sidebarCollapsed} active={workspaceView === 'filingPack'} icon={<FileArchive />} label="CIPC Filing Pack" onClick={() => { setWorkspaceView('filingPack'); onClearCompany(); }} />
           <NavItem compact={sidebarCollapsed} active={workspaceView === 'followUps'} icon={<Users />} label="Follow-ups" onClick={() => { setWorkspaceView('followUps'); onClearCompany(); }} />
@@ -4668,6 +4837,22 @@ function Dashboard({
                 />
               ) : workspaceView === 'filingPack' ? (
                 <FilingPackWorkspace companies={companies} onSelectCompany={onSelectCompany} />
+              ) : workspaceView === 'trusts' ? (
+                <TrustsWorkspace
+                  companies={companies}
+                  companyDetails={companyDetails}
+                  trustProfiles={trustProfiles}
+                  trustProfileReviews={trustProfileReviews}
+                  analysisJobs={analysisJobs}
+                  permissions={permissions}
+                  isSaving={isSavingDetail || isSavingCompany}
+                  onAddTrustProfile={onAddTrustProfile}
+                  onUploadAnalysisDocuments={onUploadAnalysisDocuments}
+                  onApplyDocumentAnalysis={onApplyDocumentAnalysis}
+                  onRetryDocumentAnalysis={onRetryDocumentAnalysis}
+                  onOpenStoragePath={onOpenStoragePath}
+                  onSelectCompany={onSelectCompany}
+                />
               ) : workspaceView === 'documents' ? (
                 <DocumentAnalyzerWorkspace
                   companies={companies}
@@ -4737,6 +4922,7 @@ function Dashboard({
               <NavItem active={workspaceView === 'dashboard' && !selectedCompany} icon={<LayoutDashboard />} label="Dashboard" onClick={() => { setWorkspaceView('dashboard'); onClearCompany(); setMobileNavOpen(false); }} />
               <NavItem active={workspaceView === 'companies'} icon={<Building2 />} label="Companies" onClick={() => { setWorkspaceView('companies'); onClearCompany(); setMobileNavOpen(false); }} />
               <NavItem active={workspaceView === 'deadlines'} icon={<CalendarDays />} label="Deadlines" onClick={() => { setWorkspaceView('deadlines'); onClearCompany(); setMobileNavOpen(false); }} />
+              <NavItem active={workspaceView === 'trusts'} icon={<ShieldCheck />} label="Trusts" onClick={() => { setWorkspaceView('trusts'); onClearCompany(); setMobileNavOpen(false); }} />
               <NavItem active={workspaceView === 'documents'} icon={<Upload />} label="AI Document Analyzer" onClick={() => { setWorkspaceView('documents'); onClearCompany(); setMobileNavOpen(false); }} />
               <NavItem active={workspaceView === 'filingPack'} icon={<FileArchive />} label="CIPC Filing Pack" onClick={() => { setWorkspaceView('filingPack'); onClearCompany(); setMobileNavOpen(false); }} />
               <NavItem active={workspaceView === 'followUps'} icon={<Users />} label="Follow-ups" onClick={() => { setWorkspaceView('followUps'); onClearCompany(); setMobileNavOpen(false); }} />
@@ -8838,6 +9024,7 @@ function normalizeTrustExtraction(data = {}) {
 
   return {
     shareholderId: String(data.shareholderId || data.shareholder_id || '').trim(),
+    trustProfileId: String(data.trustProfileId || data.trust_profile_id || '').trim(),
     trust: {
       name: String(trust.name || '').trim(),
       registrationNumber: String(trust.registrationNumber || trust.registration_number || '').trim(),
@@ -10076,33 +10263,456 @@ function DashboardHome({ stats, companies, allTasks, recentActivity, onAddCompan
   );
 }
 
-function DocumentAnalyzerWorkspace({ companies, companyDetails, analysisJobs, permissions, isSaving, onUploadAnalysisDocuments, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onRemoveAnalysisJob, onOpenStoragePath }) {
-  const [files, setFiles] = useState([]);
-  const [analysisType, setAnalysisType] = useState('company_onboarding');
-  const [targetCompanyId, setTargetCompanyId] = useState('');
-  const [targetShareholderId, setTargetShareholderId] = useState('');
-  const [selectedJobId, setSelectedJobId] = useState(analysisJobs[0]?.id || '');
-  const selectedJob = analysisJobs.find((job) => job.id === selectedJobId) || analysisJobs[0] || null;
-  const targetCompanyDetail = targetCompanyId ? companyDetails?.[targetCompanyId] || createEmptyCompanyDetail() : createEmptyCompanyDetail();
-  const trustShareholders = (targetCompanyDetail.shareholders || []).filter((shareholder) => shareholder.shareholderType === 'trust');
+function buildTrustRegisterRecords(companies = [], companyDetails = {}, trustProfiles = [], trustProfileReviews = [], analysisJobs = []) {
+  const records = [];
+  for (const company of companies) {
+    const detail = companyDetails[company.id] || createEmptyCompanyDetail();
+    for (const shareholder of detail.shareholders.filter((item) => item.shareholderType === 'trust')) {
+      const review = (detail.trustReviews || []).find((item) => String(item.shareholderId) === String(shareholder.id));
+      const trustProfile = shareholder.trustProfileId ? trustProfiles.find((item) => String(item.id) === String(shareholder.trustProfileId)) : null;
+      const analysisJob = findTrustAnalysisJob(analysisJobs, { companyId: company.id, shareholderId: shareholder.id, trustProfileId: shareholder.trustProfileId });
+      records.push({
+        key: `shareholder-${shareholder.id}`,
+        source: 'shareholder',
+        sourceLabel: trustProfile ? 'Linked trust shareholder' : 'Trust shareholder',
+        id: shareholder.id,
+        shareholderId: shareholder.id,
+        trustProfileId: shareholder.trustProfileId || '',
+        primaryCompanyId: company.id,
+        name: trustProfile?.name || shareholder.name,
+        registrationNumber: trustProfile?.registrationNumber || shareholder.idNumber || '',
+        masterReference: trustProfile?.masterReference || '',
+        notes: trustProfile?.notes || '',
+        review,
+        analysisJob,
+        hasTrustDeed: Boolean((detail.documents || []).some((document) => document.documentType === 'trust_deed') || analysisJob?.document),
+        linkedCompanies: [{ company, companyId: company.id, companyName: company.name, shareholderId: shareholder.id, ownershipPercentage: shareholder.ownershipPercentage }]
+      });
+    }
+  }
+
+  for (const profile of trustProfiles) {
+    const linkedRecords = records.filter((record) => String(record.trustProfileId) === String(profile.id));
+    if (linkedRecords.length) continue;
+    const review = trustProfileReviews.find((item) => String(item.trustProfileId) === String(profile.id));
+    const analysisJob = findTrustAnalysisJob(analysisJobs, { trustProfileId: profile.id });
+    records.push({
+      key: `profile-${profile.id}`,
+      source: 'profile',
+      sourceLabel: 'Standalone trust',
+      id: profile.id,
+      shareholderId: '',
+      trustProfileId: profile.id,
+      primaryCompanyId: null,
+      name: profile.name,
+      registrationNumber: profile.registrationNumber,
+      masterReference: profile.masterReference,
+      notes: profile.notes,
+      review,
+      analysisJob,
+      hasTrustDeed: Boolean(analysisJob?.document),
+      linkedCompanies: []
+    });
+  }
+
+  return records.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function findTrustAnalysisJob(analysisJobs, { companyId, shareholderId, trustProfileId }) {
+  return (analysisJobs || []).find((job) => {
+    if (job.analysisType !== 'trust_deed') return false;
+    const reviewed = job.reviewedData || {};
+    return (shareholderId && String(reviewed.shareholderId || '') === String(shareholderId)) ||
+      (trustProfileId && String(reviewed.trustProfileId || '') === String(trustProfileId)) ||
+      (companyId && String(job.companyId || '') === String(companyId) && !reviewed.shareholderId && !reviewed.trustProfileId);
+  });
+}
+
+function trustReviewToExtraction(trust) {
+  const review = trust?.review;
+  const jobData = trust?.analysisJob?.reviewedData && Object.keys(trust.analysisJob.reviewedData).length
+    ? trust.analysisJob.reviewedData
+    : trust?.analysisJob?.extractedData;
+  if (review) {
+    return normalizeTrustExtraction({
+      shareholderId: trust.shareholderId,
+      trustProfileId: trust.trustProfileId,
+      trust: {
+        name: trust.name,
+        registrationNumber: trust.registrationNumber,
+        masterReference: trust.masterReference
+      },
+      trustees: review.trustees,
+      beneficiaries: review.beneficiaries,
+      founders: review.founders,
+      controllers: review.controllers,
+      notes: review.notes
+    });
+  }
+  return normalizeTrustExtraction({
+    ...(jobData || {}),
+    shareholderId: trust?.shareholderId || jobData?.shareholderId,
+    trustProfileId: trust?.trustProfileId || jobData?.trustProfileId,
+    trust: {
+      name: trust?.name || jobData?.trust?.name || '',
+      registrationNumber: trust?.registrationNumber || jobData?.trust?.registrationNumber || '',
+      masterReference: trust?.masterReference || jobData?.trust?.masterReference || ''
+    }
+  });
+}
+
+function trustToSyntheticAnalysisJob(trust) {
+  return {
+    id: `manual-trust-review-${trust.key}`,
+    companyId: trust.primaryCompanyId || null,
+    documentId: '',
+    analysisType: 'trust_deed',
+    status: 'review_required',
+    extractedData: {},
+    reviewedData: {
+      shareholderId: trust.shareholderId || '',
+      trustProfileId: trust.trustProfileId || ''
+    },
+    document: null
+  };
+}
+
+function findTrustMatches(form, trustProfiles, trustRecords) {
+  const name = normalizeTrustMatchValue(form.name);
+  const registration = normalizeTrustMatchValue(form.registrationNumber);
+  const master = normalizeTrustMatchValue(form.masterReference);
+  if (!name && !registration && !master) return [];
+  const candidates = [
+    ...(trustProfiles || []).map((trust) => ({ ...trust, key: `profile-match-${trust.id}` })),
+    ...(trustRecords || [])
+  ];
+  return candidates.filter((trust) =>
+    (name && normalizeTrustMatchValue(trust.name) === name) ||
+    (registration && normalizeTrustMatchValue(trust.registrationNumber) === registration) ||
+    (master && normalizeTrustMatchValue(trust.masterReference) === master)
+  );
+}
+
+function normalizeTrustMatchValue(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '').trim();
+}
+
+function MetricCard({ label, value, detail, tone = 'default' }) {
+  const tones = {
+    default: 'text-forest',
+    green: 'text-forest',
+    amber: 'text-gold',
+    red: 'text-red-700'
+  };
+  return (
+    <div className="rounded-md border border-ink/10 bg-paper p-4">
+      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-ink/45">{label}</p>
+      <p className={`mt-2 text-3xl font-semibold ${tones[tone] || tones.default}`}>{value}</p>
+      <p className="mt-1 text-xs text-ink/55">{detail}</p>
+    </div>
+  );
+}
+
+function TrustsWorkspace({
+  companies,
+  companyDetails,
+  trustProfiles,
+  trustProfileReviews,
+  analysisJobs,
+  permissions,
+  isSaving,
+  onAddTrustProfile,
+  onUploadAnalysisDocuments,
+  onApplyDocumentAnalysis,
+  onRetryDocumentAnalysis,
+  onOpenStoragePath,
+  onSelectCompany
+}) {
+  const trustRecords = useMemo(
+    () => buildTrustRegisterRecords(companies, companyDetails, trustProfiles, trustProfileReviews, analysisJobs),
+    [companies, companyDetails, trustProfiles, trustProfileReviews, analysisJobs]
+  );
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [selectedKey, setSelectedKey] = useState('');
+  const [showAdd, setShowAdd] = useState(false);
+  const selectedTrust = trustRecords.find((trust) => trust.key === selectedKey) || trustRecords[0] || null;
 
   useEffect(() => {
-    if (!analysisJobs.length) {
+    if (!trustRecords.length) {
+      setSelectedKey('');
+      return;
+    }
+    if (!selectedKey || !trustRecords.some((trust) => trust.key === selectedKey)) {
+      setSelectedKey(trustRecords[0].key);
+    }
+  }, [trustRecords, selectedKey]);
+
+  const filtered = trustRecords.filter((trust) => {
+    const q = query.toLowerCase().trim();
+    const matchesQuery = !q ||
+      trust.name.toLowerCase().includes(q) ||
+      trust.registrationNumber.toLowerCase().includes(q) ||
+      trust.masterReference.toLowerCase().includes(q) ||
+      trust.linkedCompanies.some((link) => link.companyName.toLowerCase().includes(q));
+    const matchesFilter = filter === 'all' ||
+      (filter === 'missing_deed' && !trust.hasTrustDeed) ||
+      (filter === 'review_required' && !trust.review) ||
+      (filter === 'ready' && trust.review);
+    return matchesQuery && matchesFilter;
+  });
+  const stats = {
+    total: trustRecords.length,
+    missingDeed: trustRecords.filter((trust) => !trust.hasTrustDeed).length,
+    reviewRequired: trustRecords.filter((trust) => !trust.review).length,
+    ready: trustRecords.filter((trust) => trust.review).length
+  };
+
+  return (
+    <div className="space-y-6">
+      <section className="rounded-lg border border-ink/10 bg-white shadow-sm">
+        <div className="flex flex-col gap-3 border-b border-ink/10 px-5 py-5 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h3 className="text-xl font-semibold">Trusts</h3>
+            <p className="mt-1 text-sm leading-6 text-ink/60">Central register for trust shareholders, standalone trusts, Trust Deeds, and BO review status.</p>
+          </div>
+          <button disabled={!permissions.canEditBoRecords} onClick={() => setShowAdd((current) => !current)} className="rounded-md bg-forest px-4 py-3 text-sm font-semibold text-white disabled:bg-ink/30">
+            Add standalone trust
+          </button>
+        </div>
+
+        <div className="grid gap-4 p-5 md:grid-cols-4">
+          <MetricCard label="Total trusts" value={stats.total} detail="Shareholder and standalone records" />
+          <MetricCard label="Trust Deed missing" value={stats.missingDeed} detail="Upload evidence required" tone="amber" />
+          <MetricCard label="Review required" value={stats.reviewRequired} detail="People not reviewed" tone="red" />
+          <MetricCard label="BO ready" value={stats.ready} detail="Trust review captured" tone="green" />
+        </div>
+
+        {showAdd && (
+          <div className="border-t border-ink/10 px-5 py-5">
+            <TrustProfileForm
+              trustProfiles={trustProfiles}
+              trustRecords={trustRecords}
+              isSaving={isSaving}
+              onSubmit={(profile) => {
+                onAddTrustProfile(profile);
+                setShowAdd(false);
+              }}
+            />
+          </div>
+        )}
+
+        <div className="grid gap-0 border-t border-ink/10 xl:grid-cols-[380px_minmax(0,1fr)]">
+          <div className="border-r border-ink/10 p-4">
+            <div className="space-y-3">
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search trusts, references or companies" className="h-11 w-full rounded-md border border-ink/15 bg-white px-3 text-sm outline-none focus:border-forest focus:ring-4 focus:ring-sage" />
+              <div className="flex flex-wrap gap-2">
+                {[
+                  ['all', 'All'],
+                  ['missing_deed', 'Missing deed'],
+                  ['review_required', 'Review required'],
+                  ['ready', 'BO ready']
+                ].map(([value, label]) => (
+                  <button key={value} onClick={() => setFilter(value)} className={`rounded-md border px-3 py-2 text-xs font-semibold ${filter === value ? 'border-forest bg-sage text-forest' : 'border-ink/10 text-ink/55 hover:bg-paper'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="mt-4 max-h-[640px] space-y-2 overflow-y-auto pr-1">
+              {filtered.map((trust) => (
+                <button key={trust.key} onClick={() => setSelectedKey(trust.key)} className={`w-full rounded-md border p-3 text-left ${selectedTrust?.key === trust.key ? 'border-forest bg-sage/70' : 'border-ink/10 hover:bg-paper'}`}>
+                  <span className="block font-semibold">{trust.name}</span>
+                  <span className="mt-1 block text-xs text-ink/55">{trust.sourceLabel} - {trust.linkedCompanies.length || 0} linked compan{trust.linkedCompanies.length === 1 ? 'y' : 'ies'}</span>
+                  <span className={`mt-2 inline-flex rounded-full border px-2 py-1 text-xs font-semibold ${trust.review ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+                    {trust.review ? 'Review captured' : 'Review required'}
+                  </span>
+                </button>
+              ))}
+              {filtered.length === 0 && <p className="rounded-md border border-ink/10 bg-paper p-4 text-sm text-ink/55">No trusts match this view.</p>}
+            </div>
+          </div>
+
+          <TrustDetailPanel
+            trust={selectedTrust}
+            permissions={permissions}
+            isSaving={isSaving}
+            onUploadAnalysisDocuments={onUploadAnalysisDocuments}
+            onApplyDocumentAnalysis={onApplyDocumentAnalysis}
+            onRetryDocumentAnalysis={onRetryDocumentAnalysis}
+            onOpenStoragePath={onOpenStoragePath}
+            onSelectCompany={onSelectCompany}
+          />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TrustProfileForm({ trustProfiles, trustRecords, isSaving, onSubmit }) {
+  const [form, setForm] = useState({ name: '', registrationNumber: '', masterReference: '', notes: '' });
+  const matches = findTrustMatches(form, trustProfiles, trustRecords);
+  const submit = (event) => {
+    event.preventDefault();
+    onSubmit(form);
+    setForm({ name: '', registrationNumber: '', masterReference: '', notes: '' });
+  };
+  return (
+    <form onSubmit={submit} className="rounded-md border border-ink/10 bg-paper p-4">
+      <h4 className="font-semibold">Add standalone trust</h4>
+      <div className="mt-4 grid gap-4 lg:grid-cols-3">
+        <Field label="Trust name" value={form.name} onChange={(name) => setForm({ ...form, name })} />
+        <Field label="Registration number" value={form.registrationNumber} onChange={(registrationNumber) => setForm({ ...form, registrationNumber })} />
+        <Field label="Master reference" value={form.masterReference} onChange={(masterReference) => setForm({ ...form, masterReference })} />
+        <div className="lg:col-span-3">
+          <Field label="Notes" value={form.notes} onChange={(notes) => setForm({ ...form, notes })} />
+        </div>
+      </div>
+      {matches.length > 0 && (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <p className="font-semibold">Possible existing trust match</p>
+          {matches.slice(0, 3).map((match) => <p key={match.key || match.id} className="mt-1">{match.name} {match.registrationNumber || match.masterReference ? `- ${match.registrationNumber || match.masterReference}` : ''}</p>)}
+          <p className="mt-2 text-xs">The app will not link or merge records automatically. Confirm the trust is separate before saving.</p>
+        </div>
+      )}
+      <button disabled={isSaving || !form.name.trim()} className="mt-4 rounded-md bg-forest px-4 py-3 text-sm font-semibold text-white disabled:bg-ink/30">
+        Save trust
+      </button>
+    </form>
+  );
+}
+
+function TrustDetailPanel({ trust, permissions, isSaving, onUploadAnalysisDocuments, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onOpenStoragePath, onSelectCompany }) {
+  const [files, setFiles] = useState([]);
+  const [draft, setDraft] = useState(() => trustReviewToExtraction(trust));
+  useEffect(() => {
+    setDraft(trustReviewToExtraction(trust));
+    setFiles([]);
+  }, [trust?.key]);
+
+  if (!trust) {
+    return (
+      <div className="grid min-h-[520px] place-items-center bg-paper p-8 text-center">
+        <div>
+          <ShieldCheck className="mx-auto h-8 w-8 text-forest" />
+          <p className="mt-3 font-semibold">No trust selected</p>
+          <p className="mt-1 text-sm text-ink/55">Add a standalone trust or capture a trust shareholder in a company.</p>
+        </div>
+      </div>
+    );
+  }
+
+  const analysisJob = trust.analysisJob;
+  const peopleRows = [
+    ...draft.trustees.map((person) => ({ ...person, role: 'trustee' })),
+    ...draft.beneficiaries.map((person) => ({ ...person, role: 'beneficiary' })),
+    ...draft.founders.map((person) => ({ ...person, role: 'founder' })),
+    ...draft.controllers.map((person) => ({ ...person, role: 'controller' }))
+  ];
+  const canSave = permissions.canEditBoRecords && peopleRows.some((person) => person.fullName.trim());
+  const upload = (event) => {
+    event.preventDefault();
+    onUploadAnalysisDocuments({
+      files,
+      analysisType: 'trust_deed',
+      companyId: trust.primaryCompanyId || null,
+      shareholderId: trust.shareholderId || null,
+      trustProfileId: trust.trustProfileId || null
+    });
+    setFiles([]);
+    event.currentTarget.reset();
+  };
+
+  return (
+    <div className="space-y-5 p-5">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div>
+          <h4 className="text-xl font-semibold">{trust.name}</h4>
+          <p className="mt-1 text-sm text-ink/55">{trust.registrationNumber || trust.masterReference || 'Reference not captured'}</p>
+          <p className="mt-1 text-xs font-semibold uppercase tracking-[0.14em] text-ink/40">{trust.sourceLabel}</p>
+        </div>
+        <AnalysisStatusBadge status={analysisJob?.status || (trust.review ? 'applied' : 'review_required')} />
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-3">
+        <InfoTile label="Trust Deed" value={trust.hasTrustDeed ? 'Uploaded' : 'Missing'} />
+        <InfoTile label="Trust review" value={trust.review ? 'Captured' : 'Required'} />
+        <InfoTile label="BO action" value={trust.review ? 'Ready to create BO records' : 'Review Trust Deed'} />
+      </div>
+
+      <div className="rounded-md border border-ink/10 bg-paper p-4">
+        <p className="text-sm font-semibold">Linked companies</p>
+        <div className="mt-3 space-y-2">
+          {trust.linkedCompanies.map((link) => (
+            <button key={`${link.companyId}-${link.shareholderId}`} onClick={() => link.company && onSelectCompany(link.company)} className="flex w-full items-center justify-between gap-3 rounded-md border border-ink/10 bg-white p-3 text-left text-sm hover:bg-sage/50">
+              <span>
+                <span className="block font-semibold">{link.companyName}</span>
+                <span className="text-ink/55">{link.ownershipPercentage}% shareholder</span>
+              </span>
+              <ArrowRight className="h-4 w-4 text-ink/35" />
+            </button>
+          ))}
+          {trust.linkedCompanies.length === 0 && <p className="text-sm text-ink/55">Standalone trust. No company shareholding linked yet.</p>}
+        </div>
+      </div>
+
+      <form onSubmit={upload} className="rounded-md border border-ink/10 bg-white p-4">
+        <p className="text-sm font-semibold">Upload Trust Deed</p>
+        <input type="file" accept="application/pdf,.pdf" onChange={(event) => setFiles(Array.from(event.target.files || []))} className="mt-3 block w-full rounded-md border border-ink/15 bg-white px-3 py-2 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-sage file:px-3 file:py-2 file:text-sm file:font-semibold file:text-forest" />
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button disabled={isSaving || !permissions.canEditBoRecords || files.length === 0} className="rounded-md bg-forest px-4 py-3 text-sm font-semibold text-white disabled:bg-ink/30">Analyze Trust Deed</button>
+          {analysisJob?.document?.filePath && (
+            <button type="button" onClick={() => onOpenStoragePath(analysisJob.document.filePath)} className="rounded-md border border-forest/30 px-4 py-3 text-sm font-semibold text-forest hover:bg-sage">View source PDF</button>
+          )}
+          {analysisJob && analysisJob.status !== 'applied' && (
+            <button type="button" onClick={() => onRetryDocumentAnalysis(analysisJob)} disabled={isSaving || analysisJob.status === 'analyzing'} className="rounded-md border border-gold/60 px-4 py-3 text-sm font-semibold text-gold hover:bg-gold/5 disabled:opacity-40">Retry analysis</button>
+          )}
+        </div>
+      </form>
+
+      <TrustMap trustName={trust.name} peopleRows={peopleRows} />
+
+      <div className="space-y-4">
+        <TrustPeopleEditor title="Trustees" role="trustee" people={draft.trustees} onChange={(trustees) => setDraft({ ...draft, trustees })} />
+        <TrustPeopleEditor title="Beneficiaries" role="beneficiary" people={draft.beneficiaries} onChange={(beneficiaries) => setDraft({ ...draft, beneficiaries })} />
+        <TrustPeopleEditor title="Founder / settlor" role="founder" people={draft.founders} onChange={(founders) => setDraft({ ...draft, founders })} />
+        <TrustPeopleEditor title="Protectors / controllers" role="controller" people={draft.controllers} onChange={(controllers) => setDraft({ ...draft, controllers })} />
+        <Field label="Review notes" value={draft.notes} onChange={(notes) => setDraft({ ...draft, notes })} />
+      </div>
+
+      <button
+        type="button"
+        onClick={() => onApplyDocumentAnalysis({ job: analysisJob || trustToSyntheticAnalysisJob(trust), reviewedData: draft, applyMode: 'trust_deed' })}
+        disabled={!canSave || isSaving}
+        className="rounded-md bg-forest px-5 py-3 text-sm font-semibold text-white disabled:bg-ink/30"
+      >
+        Save trust review
+      </button>
+    </div>
+  );
+}
+
+function DocumentAnalyzerWorkspace({ companies, companyDetails, analysisJobs, permissions, isSaving, onUploadAnalysisDocuments, onApplyDocumentAnalysis, onRetryDocumentAnalysis, onRemoveAnalysisJob, onOpenStoragePath }) {
+  const [files, setFiles] = useState([]);
+  const [selectedJobId, setSelectedJobId] = useState(analysisJobs[0]?.id || '');
+  const companyAnalysisJobs = analysisJobs.filter((job) => job.analysisType !== 'trust_deed');
+  const selectedJob = companyAnalysisJobs.find((job) => job.id === selectedJobId) || companyAnalysisJobs[0] || null;
+
+  useEffect(() => {
+    if (!companyAnalysisJobs.length) {
       setSelectedJobId('');
       return;
     }
-    if (!selectedJobId || !analysisJobs.some((job) => job.id === selectedJobId)) {
-      setSelectedJobId(analysisJobs[0].id);
+    if (!selectedJobId || !companyAnalysisJobs.some((job) => job.id === selectedJobId)) {
+      setSelectedJobId(companyAnalysisJobs[0].id);
     }
-  }, [analysisJobs, selectedJobId]);
+  }, [companyAnalysisJobs, selectedJobId]);
 
   const submit = (event) => {
     event.preventDefault();
     onUploadAnalysisDocuments({
       files,
-      analysisType,
-      companyId: analysisType === 'trust_deed' ? targetCompanyId : null,
-      shareholderId: analysisType === 'trust_deed' ? targetShareholderId : null
+      analysisType: 'company_onboarding'
     });
     setFiles([]);
     event.currentTarget.reset();
@@ -10110,8 +10720,7 @@ function DocumentAnalyzerWorkspace({ companies, companyDetails, analysisJobs, pe
 
   const uploadDisabled = isSaving ||
     !permissions.canEditCompany ||
-    files.length === 0 ||
-    (analysisType === 'trust_deed' && (!targetCompanyId || !targetShareholderId));
+    files.length === 0;
 
   return (
     <div className="space-y-6">
@@ -10130,36 +10739,8 @@ function DocumentAnalyzerWorkspace({ companies, companyDetails, analysisJobs, pe
         <div className="grid gap-5 p-5 xl:grid-cols-[360px_minmax(0,1fr)]">
           <div className="space-y-4">
             <form onSubmit={submit} className="rounded-md border border-ink/10 bg-paper p-4">
-              <p className="text-sm font-semibold">1. Upload documents</p>
-              <p className="mt-1 text-sm leading-6 text-ink/55">Choose an intake type, upload the PDF, then review extracted data before applying it.</p>
-              <label className="mt-4 block">
-                <span className="mb-2 block text-sm font-medium">Analyzer type</span>
-                <select value={analysisType} onChange={(event) => { setAnalysisType(event.target.value); setTargetShareholderId(''); }} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm">
-                  <option value="company_onboarding">Company onboarding</option>
-                  <option value="trust_deed">Trust Deed / Trust Map</option>
-                </select>
-              </label>
-              {analysisType === 'trust_deed' && (
-                <div className="mt-4 space-y-3 rounded-md border border-amber-200 bg-amber-50 p-3">
-                  <label className="block">
-                    <span className="mb-2 block text-sm font-medium">Company</span>
-                    <select value={targetCompanyId} onChange={(event) => { setTargetCompanyId(event.target.value); setTargetShareholderId(''); }} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm">
-                      <option value="">Select company</option>
-                      {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
-                    </select>
-                  </label>
-                  <label className="block">
-                    <span className="mb-2 block text-sm font-medium">Trust shareholder</span>
-                    <select value={targetShareholderId} onChange={(event) => setTargetShareholderId(event.target.value)} disabled={!targetCompanyId || trustShareholders.length === 0} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm disabled:bg-ink/5">
-                      <option value="">Select trust shareholder</option>
-                      {trustShareholders.map((shareholder) => <option key={shareholder.id} value={shareholder.id}>{shareholder.name}</option>)}
-                    </select>
-                    {targetCompanyId && trustShareholders.length === 0 && (
-                      <span className="mt-2 block text-xs leading-5 text-amber-900">Open this company and add a trust shareholder before analyzing a Trust Deed.</span>
-                    )}
-                  </label>
-                </div>
-              )}
+              <p className="text-sm font-semibold">1. Upload company documents</p>
+              <p className="mt-1 text-sm leading-6 text-ink/55">Use CIPC registration certificates, CoR documents, or company disclosure PDFs. Trust Deeds are handled on the Trusts page.</p>
               <label className="mt-4 block">
                 <span className="mb-2 block text-sm font-medium">PDF files</span>
                 <input
@@ -10185,7 +10766,7 @@ function DocumentAnalyzerWorkspace({ companies, companyDetails, analysisJobs, pe
                 <p className="text-sm font-semibold">2. Intake queue</p>
               </div>
               <div className="max-h-[420px] space-y-2 overflow-y-auto p-3">
-                {analysisJobs.map((job) => (
+                {companyAnalysisJobs.map((job) => (
                   <div
                     key={job.id}
                     className={`flex items-start gap-2 rounded-md border p-2 text-sm ${selectedJob?.id === job.id ? 'border-forest bg-sage/70' : 'border-ink/10 hover:bg-paper'}`}
@@ -10215,7 +10796,7 @@ function DocumentAnalyzerWorkspace({ companies, companyDetails, analysisJobs, pe
                     </button>
                   </div>
                 ))}
-                {analysisJobs.length === 0 && (
+                {companyAnalysisJobs.length === 0 && (
                   <div className="rounded-md border border-ink/10 bg-paper p-4 text-sm leading-6 text-ink/55">
                     No documents analyzed yet. Upload a CIPC company document to start.
                   </div>
