@@ -24,6 +24,7 @@ import {
   Plus,
   Quote,
   Search,
+  Share2,
   ShieldCheck,
   Sparkles,
   Trash2,
@@ -36,10 +37,12 @@ import { hasSupabaseConfig, supabase } from './supabaseClient';
 
 const STORAGE_KEYS = {
   workspaceView: 'secretarialdesk.workspaceView',
-  selectedCompanyId: 'secretarialdesk.selectedCompanyId'
+  selectedCompanyId: 'secretarialdesk.selectedCompanyId',
+  companyDetailTab: 'secretarialdesk.companyDetailTab'
 };
 
 const VALID_WORKSPACE_VIEWS = ['dashboard', 'companies', 'deadlines', 'trusts', 'documents', 'filingPack', 'followUps', 'settings'];
+const VALID_COMPANY_DETAIL_TABS = ['shareholders', 'ownershipMap', 'boRegister', 'directors', 'contacts', 'tasks', 'activity'];
 
 function readStoredValue(key) {
   try {
@@ -5080,12 +5083,23 @@ function CompanyDetail({
   entityReviewLookup,
   databaseFeatures
 }) {
-  const [activeTab, setActiveTab] = useState('shareholders');
-  useEffect(() => { window.scrollTo({ top: 0, behavior: 'smooth' }); }, [activeTab]);
+  const [activeTab, setActiveTab] = useState(() => {
+    const storedTab = readStoredValue(STORAGE_KEYS.companyDetailTab);
+    return VALID_COMPANY_DETAIL_TABS.includes(storedTab) ? storedTab : 'shareholders';
+  });
   const boAssessment = assessBeneficialOwnership(detail.shareholders, detail.beneficialOwners || [], detail.trustReviews || [], detail.entityOwnershipReviews || []);
   const readiness = getReadinessChecklist(detail);
   const validation = getComplianceValidation(company, detail);
   const canGeneratePack = permissions.canGenerateFilingPack && readiness.status !== 'Action Required' && validation.criticalCount === 0;
+  const sectionItems = buildCompanySectionItems(detail, validation);
+
+  const switchCompanySection = (tab) => {
+    if (!VALID_COMPANY_DETAIL_TABS.includes(tab)) return;
+    const scrollTop = window.scrollY;
+    setActiveTab(tab);
+    writeStoredValue(STORAGE_KEYS.companyDetailTab, tab);
+    window.requestAnimationFrame(() => window.scrollTo({ top: scrollTop }));
+  };
 
   return (
     <div className="space-y-6">
@@ -5109,17 +5123,10 @@ function CompanyDetail({
       <AnnualReturnPanel company={company} detail={detail} onUpdateAnnualReturn={onUpdateAnnualReturn} onAddTask={onAddTask} isSaving={isSaving || !permissions.canEditCompany} />
 
       <section className="grid min-w-0 gap-6 2xl:grid-cols-[minmax(0,1fr)_380px]">
-        <div className="min-w-0 rounded-lg border border-ink/10 bg-white shadow-sm">
-          <div className="ui-scrollbar flex max-w-full gap-2 overflow-x-auto border-b border-ink/10 bg-paper/35 px-5 pt-4">
-            <TabButton active={activeTab === 'shareholders'} onClick={() => setActiveTab('shareholders')} label="Shareholders" />
-            <TabButton active={activeTab === 'ownershipMap'} onClick={() => setActiveTab('ownershipMap')} label="Ownership Map" />
-            <TabButton active={activeTab === 'boRegister'} onClick={() => setActiveTab('boRegister')} label="BO Register" />
-            <TabButton active={activeTab === 'directors'} onClick={() => setActiveTab('directors')} label="Directors" />
-            <TabButton active={activeTab === 'contacts'} onClick={() => setActiveTab('contacts')} label="Contacts" />
-            <TabButton active={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} label="Tasks" />
-            <TabButton active={activeTab === 'activity'} onClick={() => setActiveTab('activity')} label="Activity" />
-          </div>
-          <div className="p-5">
+        <div className="grid min-w-0 gap-4 xl:grid-cols-[220px_minmax(0,1fr)]">
+          <CompanySectionNav items={sectionItems} activeTab={activeTab} onSelect={switchCompanySection} />
+          <div className="min-w-0 rounded-lg border border-ink/10 bg-white shadow-sm">
+            <div className="p-5">
             {activeTab === 'shareholders' ? (
               <ShareholdersPanel shareholders={detail.shareholders} shareTransactions={detail.shareTransactions || []} contacts={detail.contacts || []} onAddShareholder={onAddShareholder} onUpdateShareholder={onUpdateShareholder} onDeleteShareholder={onDeleteShareholder} onSaveShareTransaction={onSaveShareTransaction} onUpdateShareTransactionStatus={onUpdateShareTransactionStatus} onAddTask={onAddTask} isSaving={isSaving || !permissions.canEditCompany} shareTransactionFeature={databaseFeatures?.shareTransactions} />
             ) : activeTab === 'ownershipMap' ? (
@@ -5140,7 +5147,7 @@ function CompanyDetail({
                 isSaving={isSaving || !permissions.canEditBoRecords}
                 entityReviewLookup={entityReviewLookup}
                 currentCompanyId={company.id}
-                onSwitchTab={setActiveTab}
+                onSwitchTab={switchCompanySection}
               />
             ) : activeTab === 'directors' ? (
               <DirectorsPanel directors={detail.directors} directorChanges={detail.directorChanges || []} contacts={detail.contacts || []} onAddDirector={onAddDirector} onUpdateDirector={onUpdateDirector} onDeleteDirector={onDeleteDirector} onSaveDirectorChange={onSaveDirectorChange} onUpdateDirectorChangeStatus={onUpdateDirectorChangeStatus} onAddTask={onAddTask} isSaving={isSaving || !permissions.canEditCompany} directorChangeFeature={databaseFeatures?.directorChanges} />
@@ -5151,6 +5158,7 @@ function CompanyDetail({
             ) : (
               <ActivityPanel company={company} detail={detail} activity={detail.activity || []} />
             )}
+            </div>
           </div>
         </div>
 
@@ -5206,6 +5214,57 @@ function CompanyDetail({
       </section>
     </div>
   );
+}
+
+function CompanySectionNav({ items, activeTab, onSelect }) {
+  return (
+    <aside className="min-w-0">
+      <div className="sticky top-24 rounded-lg border border-ink/10 bg-white p-2 shadow-sm">
+        <div className="border-b border-ink/10 px-3 py-3">
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-ink/45">Company sections</p>
+        </div>
+        <nav className="mt-2 flex gap-2 overflow-x-auto pb-1 xl:block xl:space-y-1 xl:overflow-visible xl:pb-0">
+          {items.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => onSelect(item.key)}
+              className={`flex min-w-[170px] items-center justify-between gap-3 rounded-md px-3 py-3 text-left text-sm transition xl:min-w-0 xl:w-full ${
+                activeTab === item.key
+                  ? 'bg-sage text-forest shadow-[inset_3px_0_0_#0f4739]'
+                  : 'text-ink/65 hover:bg-paper hover:text-ink'
+              }`}
+            >
+              <span className="flex min-w-0 items-center gap-3">
+                <span className="shrink-0 text-current">{item.icon}</span>
+                <span className="truncate font-semibold">{item.label}</span>
+              </span>
+              {item.count !== undefined && (
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${activeTab === item.key ? 'bg-white/75 text-forest' : 'bg-paper text-ink/55'}`}>
+                  {item.count}
+                </span>
+              )}
+            </button>
+          ))}
+        </nav>
+      </div>
+    </aside>
+  );
+}
+
+function buildCompanySectionItems(detail, validation) {
+  const openTaskCount = (detail.tasks || []).filter((task) => task.status !== 'done').length;
+  const validationCount = (validation?.criticalCount || 0) + (validation?.warningCount || 0);
+
+  return [
+    { key: 'shareholders', label: 'Shareholders', icon: <Users className="h-4 w-4" />, count: detail.shareholders?.length || 0 },
+    { key: 'ownershipMap', label: 'Ownership Map', icon: <Share2 className="h-4 w-4" />, count: undefined },
+    { key: 'boRegister', label: 'BO Register', icon: <ShieldCheck className="h-4 w-4" />, count: detail.beneficialOwners?.length || validationCount || 0 },
+    { key: 'directors', label: 'Directors', icon: <BadgeCheck className="h-4 w-4" />, count: detail.directors?.length || 0 },
+    { key: 'contacts', label: 'Contacts', icon: <Quote className="h-4 w-4" />, count: detail.contacts?.length || 0 },
+    { key: 'tasks', label: 'Tasks', icon: <Clock className="h-4 w-4" />, count: openTaskCount },
+    { key: 'activity', label: 'Activity', icon: <FileText className="h-4 w-4" />, count: detail.activity?.length || 0 }
+  ];
 }
 
 function ReadinessItem({ item }) {
@@ -6344,18 +6403,30 @@ function OwnershipMapPanel({ company, detail }) {
     }
   };
 
+  const allPathsTraced = reviewItems.length === 0 && mapNodes.length > 0;
+  const trustNodes = mapNodes.filter((n) => n.shareholderType === 'trust' && Number(n.ownershipPercentage || 0) > 5);
+  const trustDeedOnFile = trustNodes.length > 0 && trustNodes.every((n) => n.hasTrustReview);
+  const readyToFile = mapNodes.length > 0 && mapNodes.every((n) => n.status === 'confirmed' || n.status === 'below');
+
   return (
     <div className="space-y-5">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div>
-          <h3 className="text-lg font-semibold">Ownership Map</h3>
+          <h3 className="text-lg font-semibold">Effective ownership chain</h3>
           <p className="mt-1 text-sm leading-6 text-ink/55">
             Visual view of shareholders and BO findings using the South African threshold of more than 5%.
           </p>
         </div>
-        <button onClick={copyMermaid} className="rounded-md border border-gold/60 px-4 py-2 text-sm font-semibold text-gold hover:bg-gold/5">
-          {copied ? 'Copied' : 'Copy Mermaid'}
-        </button>
+        <div className="flex items-center gap-3">
+          {allPathsTraced ? (
+            <span className="rounded-full bg-forest/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.1em] text-forest">All paths traced</span>
+          ) : (
+            <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold uppercase tracking-[0.1em] text-amber-700">Paths pending</span>
+          )}
+          <button onClick={copyMermaid} className="rounded-md border border-gold/60 px-4 py-2 text-sm font-semibold text-gold hover:bg-gold/5">
+            {copied ? 'Copied' : 'Copy Mermaid'}
+          </button>
+        </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-3">
@@ -6376,12 +6447,31 @@ function OwnershipMapPanel({ company, detail }) {
         </div>
       </div>
 
-      <div className="max-w-full overflow-hidden rounded-lg border border-ink/10 bg-paper/35 p-4 shadow-inner">
-        {shareholders.length ? (
-          <OwnershipMapSvg company={company} nodes={mapNodes} />
-        ) : (
-          <div className="grid min-h-[260px] place-items-center text-center text-sm text-ink/55">
-            Add shareholders to generate the ownership map.
+      <div className="overflow-hidden rounded-lg border border-ink/10 bg-paper/35 shadow-inner">
+        <div className="p-4">
+          {shareholders.length ? (
+            <OwnershipMapSvg company={company} nodes={mapNodes} />
+          ) : (
+            <div className="grid min-h-[260px] place-items-center text-center text-sm text-ink/55">
+              Add shareholders to generate the ownership map.
+            </div>
+          )}
+        </div>
+        {shareholders.length > 0 && (
+          <div className="flex flex-wrap gap-2 border-t border-ink/10 px-4 py-3">
+            <span className="rounded-full border border-ink/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.1em] text-ink/60">
+              5% threshold respected
+            </span>
+            {trustDeedOnFile && (
+              <span className="rounded-full border border-ink/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.1em] text-ink/60">
+                Trust deed on file
+              </span>
+            )}
+            {readyToFile && (
+              <span className="rounded-full bg-forest px-3 py-1 text-xs font-semibold uppercase tracking-[0.1em] text-white">
+                Ready to file
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -6393,19 +6483,25 @@ function OwnershipMapSvg({ company, nodes }) {
   const width = 1040;
   const nodeWidth = 300;
   const companyWidth = 340;
+  const companyHeight = 92;
+  const nodeHeight = 80;
+  const boWidth = 216;
+  const boHeight = 60;
+  const boGap = 12;
   const columns = nodes.length <= 1 ? 1 : nodes.length === 2 ? 2 : 3;
   const gapX = 36;
   const startX = (width - (columns * nodeWidth + (columns - 1) * gapX)) / 2;
-  const shareholderTop = 190;
+  const shareholderTop = 200;
+  const shortTypeLabel = (type) => ({ natural_person: 'NATURAL', trust: 'TRUST', company: 'COMPANY' }[type] || String(type).toUpperCase());
   const rows = Math.max(1, Math.ceil(nodes.length / columns));
   const rowHeights = Array.from({ length: rows }, (_, rowIndex) => {
     const rowNodes = nodes.filter((_, nodeIndex) => Math.floor(nodeIndex / columns) === rowIndex);
     const displayedOwners = Math.max(0, ...rowNodes.map((node) => Math.min(node.beneficialOwners.length, 2)));
     const hasMoreOwners = rowNodes.some((node) => node.beneficialOwners.length > 2);
-    if (hasMoreOwners) return 270;
-    if (displayedOwners > 1) return 250;
-    if (displayedOwners === 1) return 204;
-    return 132;
+    if (hasMoreOwners) return nodeHeight + 28 + (boHeight + boGap) * 3;
+    if (displayedOwners > 1) return nodeHeight + 28 + (boHeight + boGap) * 2;
+    if (displayedOwners === 1) return nodeHeight + 28 + boHeight;
+    return nodeHeight + 40;
   });
   const rowTops = rowHeights.reduce((tops, rowHeight, rowIndex) => {
     tops.push(rowIndex === 0 ? shareholderTop : tops[rowIndex - 1] + rowHeights[rowIndex - 1]);
@@ -6413,19 +6509,21 @@ function OwnershipMapSvg({ company, nodes }) {
   }, []);
   const height = Math.max(420, shareholderTop + rowHeights.reduce((sum, rowHeight) => sum + rowHeight, 0) + 50);
   const companyX = (width - companyWidth) / 2;
-  const companyY = 34;
+  const companyY = 30;
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" className="block h-auto w-full max-w-full" role="img" aria-label="Ownership map">
       <defs>
-        <marker id="ownership-arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-          <path d="M0,0 L0,6 L9,3 z" fill="#6f7777" />
+        <marker id="ownership-arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto" markerUnits="strokeWidth">
+          <circle cx="4" cy="4" r="2.5" fill="#a8792c" />
         </marker>
       </defs>
-      <rect x={companyX} y={companyY} width={companyWidth} height="108" rx="8" fill="#f6f4ef" stroke="#d9d4ca" />
-      <text x={companyX + 24} y={companyY + 38} className="fill-ink text-[20px] font-semibold">{truncateSvgText(company.name, 28)}</text>
-      <text x={companyX + 24} y={companyY + 68} className="fill-ink/60 text-[14px]">{company.registrationNumber}</text>
-      <text x={companyX + 24} y={companyY + 92} className="fill-ink/45 text-[12px]">Client company</text>
+
+      {/* Company node */}
+      <rect x={companyX} y={companyY} width={companyWidth} height={companyHeight} rx="8" fill="#0f4739" stroke="#0f4739" />
+      <text x={companyX + 20} y={companyY + 20} fontSize="10" fontWeight="600" letterSpacing="0.12em" fill="#ffffff80" fontFamily="inherit">COMPANY</text>
+      <text x={companyX + 20} y={companyY + 46} fontSize="18" fontWeight="700" fill="#ffffff" fontFamily="inherit">{truncateSvgText(company.name, 28)}</text>
+      <text x={companyX + 20} y={companyY + 70} fontSize="13" fill="#ffffff60" fontFamily="inherit">{company.registrationNumber}</text>
 
       {nodes.map((node, index) => {
         const col = index % columns;
@@ -6433,27 +6531,44 @@ function OwnershipMapSvg({ company, nodes }) {
         const x = startX + col * (nodeWidth + gapX);
         const y = rowTops[row];
         const sourceX = companyX + companyWidth / 2;
-        const sourceY = companyY + 108;
+        const sourceY = companyY + companyHeight;
         const targetX = x + nodeWidth / 2;
+        const midY = (sourceY + y) / 2;
         const style = ownershipNodeStyle(node);
+        const boStartY = y + nodeHeight + 20;
         return (
           <g key={node.id}>
-            <path d={`M${sourceX} ${sourceY} C${sourceX} ${sourceY + 34}, ${targetX} ${y - 46}, ${targetX} ${y - 12}`} fill="none" stroke="#9aa1a1" strokeWidth="2" markerEnd="url(#ownership-arrow)" />
-            <text x={targetX - 14} y={y - 28} className="fill-ink/55 text-[13px]">{Number(node.ownershipPercentage || 0)}%</text>
-            <rect x={x} y={y} width={nodeWidth} height="96" rx="8" fill={style.fill} stroke={style.stroke} />
-            <text x={x + 20} y={y + 26} className="fill-ink text-[16px] font-semibold">{truncateSvgText(node.name, 26)}</text>
-            <text x={x + 20} y={y + 51} className="fill-ink/60 text-[13px]">{shareholderTypeLabel(node.shareholderType)} - {node.idNumber || 'ID/reg not captured'}</text>
-            <text x={x + 20} y={y + 74} className="text-[13px] font-semibold" fill={style.text}>{style.label}</text>
-            {node.beneficialOwners.slice(0, 2).map((owner, ownerIndex) => (
-              <g key={`${node.id}-${owner.id || owner.fullName}-${ownerIndex}`}>
-                <path d={`M${targetX} ${y + 96} C${targetX} ${y + 112}, ${targetX} ${y + 112 + ownerIndex * 44}, ${targetX} ${y + 126 + ownerIndex * 44}`} fill="none" stroke="#9aa1a1" strokeWidth="1.5" markerEnd="url(#ownership-arrow)" />
-                <rect x={x + 42} y={y + 132 + ownerIndex * 44} width="216" height="36" rx="6" fill="#ecfdf5" stroke="#a7f3d0" />
-                <text x={x + 56} y={y + 147 + ownerIndex * 44} className="fill-ink text-[11px] font-semibold">{truncateSvgText(owner.fullName, 26)}</text>
-                <text x={x + 56} y={y + 161 + ownerIndex * 44} className="fill-emerald-700 text-[10px]">{Number(owner.ownershipPercentage || owner.effectiveOwnership || 0)}% effective BO</text>
-              </g>
-            ))}
+            {/* Stepped connection line from company to shareholder */}
+            <path d={`M${sourceX} ${sourceY} L${sourceX} ${midY} L${targetX} ${midY} L${targetX} ${y}`} fill="none" stroke="#a8792c" strokeWidth="1.5" />
+
+            {/* Shareholder node */}
+            <rect x={x} y={y} width={nodeWidth} height={nodeHeight} rx="8" fill={style.fill} stroke={style.stroke} />
+            <text x={x + 20} y={y + 20} fontSize="10" fontWeight="600" letterSpacing="0.12em" fill="#20242a80" fontFamily="inherit">
+              {shortTypeLabel(node.shareholderType)} — {Number(node.ownershipPercentage || 0)}%
+            </text>
+            <text x={x + 20} y={y + 46} fontSize="16" fontWeight="700" fill="#20242a" fontFamily="inherit">{truncateSvgText(node.name, 26)}</text>
+            <text x={x + 20} y={y + 68} fontSize="12" fontWeight="600" fill={style.text} fontFamily="inherit">{style.label}</text>
+
+            {/* Beneficial owner sub-nodes */}
+            {node.beneficialOwners.slice(0, 2).map((owner, ownerIndex) => {
+              const boY = boStartY + ownerIndex * (boHeight + boGap);
+              const boX = x + (nodeWidth - boWidth) / 2;
+              const lineSrcX = targetX;
+              const lineSrcY = ownerIndex === 0 ? y + nodeHeight : boStartY + (ownerIndex - 1) * (boHeight + boGap) + boHeight;
+              return (
+                <g key={`${node.id}-${owner.id || owner.fullName}-${ownerIndex}`}>
+                  <path d={`M${lineSrcX} ${lineSrcY} L${lineSrcX} ${boY}`} fill="none" stroke="#a8792c" strokeWidth="1.5" markerEnd="url(#ownership-arrow)" />
+                  <rect x={boX} y={boY} width={boWidth} height={boHeight} rx="6" fill="#fbfaf7" stroke="#d9d4ca" />
+                  <text x={boX + 16} y={boY + 16} fontSize="9" fontWeight="600" letterSpacing="0.12em" fill="#20242a60" fontFamily="inherit">BENEFICIARY</text>
+                  <text x={boX + 16} y={boY + 36} fontSize="12" fontWeight="700" fill="#20242a" fontFamily="inherit">{truncateSvgText(owner.fullName, 24)}</text>
+                  <text x={boX + 16} y={boY + 52} fontSize="11" fill="#0f4739" fontFamily="inherit">Effective {Number(owner.ownershipPercentage || owner.effectiveOwnership || 0)}%</text>
+                </g>
+              );
+            })}
             {node.beneficialOwners.length > 2 && (
-              <text x={x + 56} y={y + 219} className="fill-emerald-700 text-[10px] font-semibold">+{node.beneficialOwners.length - 2} more BO</text>
+              <text x={x + (nodeWidth - boWidth) / 2 + 16} y={boStartY + 2 * (boHeight + boGap) + 18} fontSize="11" fontWeight="600" fill="#0f4739" fontFamily="inherit">
+                +{node.beneficialOwners.length - 2} more
+              </text>
             )}
           </g>
         );
@@ -7485,10 +7600,10 @@ function ownershipNodeStyle(node) {
   const pct = Number(node.ownershipPercentage || 0);
   if (node.status === 'confirmed') {
     return {
-      fill: '#ecfdf5',
-      stroke: '#a7f3d0',
-      text: '#047857',
-      label: node.shareholderType === 'natural_person' ? 'Beneficial owner' : 'Look-through complete'
+      fill: '#fbfaf7',
+      stroke: '#d9d4ca',
+      text: '#0f4739',
+      label: node.shareholderType === 'natural_person' ? '✓ Beneficial owner' : 'Look-through complete'
     };
   }
   if (node.status === 'pendingRecords') {
@@ -7516,7 +7631,7 @@ function ownershipNodeStyle(node) {
     };
   }
   return {
-    fill: '#ffffff',
+    fill: '#fbfaf7',
     stroke: '#e7e2d8',
     text: '#6f7777',
     label: 'Below direct threshold'
