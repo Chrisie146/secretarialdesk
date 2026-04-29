@@ -31,7 +31,7 @@ import {
   X
 } from 'lucide-react';
 import './styles.css';
-import { hasSupabaseConfig, supabase, supabaseEnvStatus } from './supabaseClient';
+import { hasSupabaseConfig, supabase } from './supabaseClient';
 
 const initialCompanies = [
   {
@@ -2923,72 +2923,6 @@ function buildTaskAuditDetails(before, after) {
     before: auditSnapshot(before),
     after: auditSnapshot(after)
   };
-}
-
-function buildProductionReadiness({ hasSupabaseConfig, envStatus, session, practice, practiceMembers, currentUserRole, permissions, companies, databaseFeatures }) {
-  const directorFeature = databaseFeatures?.directorChanges || createDatabaseFeatureStatus();
-  const shareFeature = databaseFeatures?.shareTransactions || createDatabaseFeatureStatus();
-  const workflowTablesReady = !hasSupabaseConfig || (directorFeature.available && shareFeature.available);
-  return [
-    {
-      label: 'VITE_SUPABASE_URL',
-      ok: envStatus.hasUrl,
-      detail: envStatus.hasUrl ? `Configured for ${envStatus.projectHost}.` : 'Missing. Add VITE_SUPABASE_URL to your deployment environment.'
-    },
-    {
-      label: 'VITE_SUPABASE_ANON_KEY',
-      ok: envStatus.hasAnonKey,
-      detail: envStatus.hasAnonKey ? 'Configured.' : 'Missing. Add VITE_SUPABASE_ANON_KEY to your deployment environment.'
-    },
-    {
-      label: 'Authentication',
-      ok: Boolean(session?.user?.email),
-      warning: hasSupabaseConfig && !session?.user?.email,
-      detail: session?.user?.email ? `Signed in as ${session.user.email}.` : hasSupabaseConfig ? 'Supabase is configured, but no user session is active.' : 'Demo mode bypasses Supabase authentication.'
-    },
-    {
-      label: 'Practice access',
-      ok: Boolean(practice?.id) || !hasSupabaseConfig,
-      detail: practice?.id ? `Practice loaded with role ${roleLabel(currentUserRole)}.` : 'No Supabase practice workspace loaded.'
-    },
-    {
-      label: 'Role permissions',
-      ok: permissions.canManagePractice || permissions.canEditCompany || permissions.isReadOnly,
-      warning: permissions.isReadOnly,
-      detail: permissions.isReadOnly ? 'Current user can view records and export reports only.' : `Current user can ${permissions.canManagePractice ? 'manage the practice and ' : ''}edit compliance records.`
-    },
-    {
-      label: 'Storage bucket',
-      ok: hasSupabaseConfig,
-      warning: !hasSupabaseConfig,
-      detail: hasSupabaseConfig
-        ? 'Document storage is platform-managed. Users do not need Supabase access.'
-        : 'Storage is unavailable in demo mode.'
-    },
-    {
-      label: 'Client data',
-      ok: companies.length > 0,
-      warning: companies.length === 0,
-      detail: `${companies.length} compan${companies.length === 1 ? 'y' : 'ies'} loaded.`
-    },
-    {
-      label: 'Team records',
-      ok: practiceMembers.length > 0 || !hasSupabaseConfig,
-      warning: hasSupabaseConfig && practiceMembers.length === 0,
-      detail: hasSupabaseConfig ? `${practiceMembers.length} membership record${practiceMembers.length === 1 ? '' : 's'} visible.` : 'Skipped in demo mode.'
-    },
-    {
-      label: 'Workflow tables',
-      ok: workflowTablesReady,
-      warning: hasSupabaseConfig && !workflowTablesReady,
-      detail: workflowTablesReady
-        ? 'Director change and share register workflow tables are available.'
-        : [
-            !directorFeature.available ? databaseFeatureUnavailableMessage('Director change filings', directorFeature) : '',
-            !shareFeature.available ? databaseFeatureUnavailableMessage('Share register maintenance', shareFeature) : ''
-          ].filter(Boolean).join(' ')
-    }
-  ];
 }
 
 function isUuid(value) {
@@ -9708,18 +9642,6 @@ function PracticeSettingsWorkspace({
     setRestoreText('');
   };
 
-  const readiness = buildProductionReadiness({
-    hasSupabaseConfig,
-    envStatus: supabaseEnvStatus,
-    session,
-    practice,
-    practiceMembers,
-    currentUserRole,
-    permissions,
-    companies,
-    databaseFeatures
-  });
-
   return (
     <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_440px]">
       <section className="rounded-lg border border-ink/10 bg-white shadow-sm">
@@ -9924,36 +9846,6 @@ function PracticeSettingsWorkspace({
       <Panel title="Document storage">
         <StorageStatusPanel hasSupabaseConfig={hasSupabaseConfig} />
       </Panel>
-      <Panel title="Production readiness">
-        <div className="space-y-3">
-          {readiness.map((item) => (
-            <ReadinessCheck key={item.label} item={item} />
-          ))}
-        </div>
-        <div className="mt-5 rounded-md bg-paper p-4">
-          <p className="text-sm font-semibold">Deployment notes</p>
-          <p className="mt-1 text-sm leading-6 text-ink/60">
-            Set the two Vite Supabase environment variables in your host, confirm the private `company-documents` bucket policies, and use a production Supabase project before accepting live client records.
-          </p>
-        </div>
-      </Panel>
-    </div>
-  );
-}
-
-function ReadinessCheck({ item }) {
-  const tone = item.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : item.warning ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-red-200 bg-red-50 text-red-800';
-  return (
-    <div className={`rounded-md border p-3 ${tone}`}>
-      <div className="flex gap-3">
-        <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full border border-current/25 bg-white/55">
-          {item.ok ? <Check className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
-        </span>
-        <div>
-          <p className="text-sm font-semibold">{item.label}</p>
-          <p className="mt-1 text-sm leading-6">{item.detail}</p>
-        </div>
-      </div>
     </div>
   );
 }
