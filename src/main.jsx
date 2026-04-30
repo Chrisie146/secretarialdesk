@@ -71,6 +71,14 @@ import { hasSupabaseConfig, supabase } from './supabaseClient';
 import { inferBoInterestHeld } from './features/beneficial-ownership/boUtils';
 import { documentLabel } from './features/documents/documentUtils';
 import { normaliseShareholderType } from './features/shareholders/shareholderUtils';
+import {
+  auditSnapshot,
+  buildAnnualReturnAuditDetails,
+  buildCompanyProfileAuditDetails,
+  buildEntityReviewAuditDetails,
+  buildTaskAuditDetails,
+  buildTrustReviewAuditDetails
+} from './utils/audit';
 import { csvCell, csvValue, downloadBlob, downloadRowsCsv, downloadTableCsv, downloadTextFile, fileSafeName } from './utils/csv';
 import { addBusinessDays, addDays, calculateNextAnnualReturnDue, formatCompanyDueDate, todayIsoDate } from './utils/dates';
 import {
@@ -3188,64 +3196,6 @@ function mergeById(existing = [], incoming = []) {
   return Array.from(map.values());
 }
 
-function auditSnapshot(value) {
-  if (!value) return null;
-  return JSON.parse(JSON.stringify(value));
-}
-
-function buildCompanyProfileAuditDetails(before, after) {
-  const fields = ['name', 'registrationNumber', 'type', 'incorporationDate', 'registeredAddress'];
-  const changes = fields
-    .filter((field) => String(before?.[field] || '') !== String(after?.[field] || ''))
-    .map((field) => ({
-      field,
-      before: before?.[field] || '',
-      after: after?.[field] || ''
-    }));
-
-  return {
-    label: after?.name || before?.name || 'Company profile',
-    summary: changes.length ? `${changes.length} company profile field${changes.length === 1 ? '' : 's'} changed` : 'Company profile saved with no tracked field changes',
-    changes,
-    before: auditSnapshot(before),
-    after: auditSnapshot(after)
-  };
-}
-
-function buildTrustReviewAuditDetails(shareholder, before, after) {
-  const counts = {
-    trustees: (after?.trustees || []).length,
-    beneficiaries: (after?.beneficiaries || []).length,
-    founders: (after?.founders || []).length,
-    controllers: (after?.controllers || []).length
-  };
-  const total = counts.trustees + counts.beneficiaries + counts.founders + counts.controllers;
-
-  return {
-    label: shareholder?.name || 'Trust review saved',
-    summary: `${shareholder?.name || 'Trust'} review saved with ${total} trust person record${total === 1 ? '' : 's'}`,
-    ...counts,
-    before: auditSnapshot(before),
-    after: auditSnapshot(after)
-  };
-}
-
-function buildEntityReviewAuditDetails(shareholder, before, after) {
-  const owners = after?.owners || [];
-  const naturalPersonCount = owners.filter((owner) => owner.ownerType === 'natural_person').length;
-  const qualifyingCount = owners.filter((owner) => owner.ownerType === 'natural_person' && Number(owner.ownershipPercentage || 0) > 5).length;
-
-  return {
-    label: shareholder?.name || 'Entity ownership review saved',
-    summary: `${shareholder?.name || 'Company shareholder'} look-through saved with ${owners.length} underlying owner${owners.length === 1 ? '' : 's'}`,
-    underlyingOwnerCount: owners.length,
-    naturalPersonCount,
-    qualifyingOwnerCount: qualifyingCount,
-    before: auditSnapshot(before),
-    after: auditSnapshot(after)
-  };
-}
-
 function buildFilingPackAuditDetails(company, detail) {
   const validation = getComplianceValidation(company, detail);
   return {
@@ -3256,23 +3206,6 @@ function buildFilingPackAuditDetails(company, detail) {
     directorCount: detail.directors?.length || 0,
     validationCriticalCount: validation.criticalCount,
     validationWarningCount: validation.warningCount
-  };
-}
-
-function buildAnnualReturnAuditDetails(before, after) {
-  return {
-    label: 'Annual return updated',
-    summary: `Annual return filed${after?.annualReturnReference ? ` with CIPC reference ${after.annualReturnReference}` : ''}. Next due date set to ${after?.nextDueDate || 'Not set'}.`,
-    reference: after?.annualReturnReference || '',
-    before: auditSnapshot({
-      nextDueDate: before?.nextDueDateRaw || '',
-      annualReturnReference: before?.annualReturnReference || ''
-    }),
-    after: auditSnapshot({
-      filedDate: after?.annualReturnLastFiledDate || '',
-      nextDueDate: after?.nextDueDateRaw || '',
-      annualReturnReference: after?.annualReturnReference || ''
-    })
   };
 }
 
@@ -3334,18 +3267,6 @@ function buildSubmissionAuditDetails(before, after) {
       cipcReference: after?.cipcReference || '',
       submissionNotes: after?.submissionNotes || ''
     })
-  };
-}
-
-function buildTaskAuditDetails(before, after) {
-  return {
-    label: after?.title || before?.title || 'Follow-up task',
-    taskType: after?.taskType || before?.taskType || 'General',
-    summary: before?.status && before.status !== after?.status
-      ? `${after?.title || before?.title || 'Follow-up task'} changed from ${before.status} to ${after?.status || 'open'}`
-      : `${after?.title || before?.title || 'Follow-up task'} updated`,
-    before: auditSnapshot(before),
-    after: auditSnapshot(after)
   };
 }
 
