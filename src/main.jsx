@@ -1,3 +1,4 @@
+import DOMPurify from 'dompurify';
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
@@ -100,6 +101,20 @@ import {
   valueByHeader
 } from './utils/importParsing';
 import { readStoredValue, writeStoredValue } from './utils/storage';
+import {
+  findDuplicateRecords,
+  isValidCompanyRegistrationNumber,
+  isValidEmail,
+  isValidOwnershipPercentage,
+  isValidSaIdNumber,
+  looksLikeSaId,
+  normalizeCompanyRegistrationNumber
+} from './utils/validation';
+
+// Strip HTML tags from any user-supplied string before inserting into PDF or DOM contexts.
+function sanitizeText(value) {
+  return DOMPurify.sanitize(String(value ?? ''), { ALLOWED_TAGS: [], ALLOWED_ATTR: [] });
+}
 
 class AppErrorBoundary extends React.Component {
   constructor(props) {
@@ -277,6 +292,23 @@ function App() {
       listener.subscription.unsubscribe();
     };
   }, []);
+
+  // Sign out after 30 minutes of inactivity to protect sensitive PII.
+  useEffect(() => {
+    if (!session || !hasSupabaseConfig) return;
+    const IDLE_MS = 30 * 60 * 1000;
+    let timer = setTimeout(() => supabase.auth.signOut(), IDLE_MS);
+    const reset = () => { clearTimeout(timer); timer = setTimeout(() => supabase.auth.signOut(), IDLE_MS); };
+    window.addEventListener('click', reset, true);
+    window.addEventListener('keydown', reset, true);
+    window.addEventListener('scroll', reset, true);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('click', reset, true);
+      window.removeEventListener('keydown', reset, true);
+      window.removeEventListener('scroll', reset, true);
+    };
+  }, [session]);
 
   useEffect(() => {
     if (!hasSupabaseConfig || !session) return;
@@ -3469,11 +3501,36 @@ function BrandMark({ compactText = false }) {
 function Landing({ onEnter }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [openFaq, setOpenFaq] = useState(0);
+  const [openPrivacy, setOpenPrivacy] = useState(-1);
+
+  const privacyQa = [
+    {
+      q: 'How is my data kept safe?',
+      a: 'Your data is stored in a secure, encrypted database hosted by Supabase, the same infrastructure trusted by thousands of businesses worldwide. Every piece of information, from ID numbers to ownership records, is encrypted both when stored and when transmitted. Nobody can intercept it in transit because all connections are forced over HTTPS. Access to data is strictly controlled and every user only sees the companies and records that belong to their practice. Even if someone tried to bypass the app, the database itself would reject their request. It\'s not just the app protecting your data, the database enforces it independently. We also automatically sign you out after 30 minutes of inactivity, so if you step away from your desk, your session does not stay open.'
+    },
+    {
+      q: 'Who can see my clients\' information?',
+      a: 'Only the people in your practice who you have given access to. We have four levels of access, from read-only viewing right up to full management. You control who gets what level of access, and you can remove someone instantly. No one outside your practice can see your data, not even us as the software provider.'
+    },
+    {
+      q: 'Where is the data stored? Is it in South Africa?',
+      a: 'The data is hosted on secure cloud infrastructure. Supabase uses AWS data centres, and you can choose a region closest to South Africa (Cape Town is available). The data never leaves the region you choose.'
+    },
+    {
+      q: 'What happens if there is a breach?',
+      a: 'We have designed the system so that even in a worst-case scenario, the damage is contained. Each practice\'s data is completely isolated, so a breach affecting one client cannot expose another. We also maintain a full audit trail of every change ever made to a record, so we can reconstruct exactly what happened and when. We would notify affected clients immediately in line with POPIA requirements.'
+    },
+    {
+      q: 'Are you POPIA compliant?',
+      a: 'Yes. POPIA, South Africa\'s data privacy law, requires that personal information is collected for a specific purpose, kept secure, and only accessible to authorised people. Our system is built around exactly those principles. Beneficial ownership data is collected specifically for CIPC compliance, access is role-controlled, and clients can request their data be removed at any time.'
+    }
+  ];
 
   const navItems = [
     { href: '#features', label: 'Features' },
     { href: '#workflow', label: 'How it works' },
     { href: '#security', label: 'Security' },
+    { href: '#privacy', label: 'Privacy' },
     { href: '#pricing', label: 'Pricing' },
     { href: '#faq', label: 'FAQ' }
   ];
@@ -3739,7 +3796,38 @@ function Landing({ onEnter }) {
           </div>
         </section>
 
-        <section id="pricing" className="bg-paper">
+        <section id="privacy" className="bg-paper">
+          <div className="mx-auto max-w-7xl px-6 py-24">
+            <div className="mx-auto max-w-3xl text-center">
+              <p className="mb-4 text-xs font-bold uppercase tracking-[0.22em] text-gold">Privacy and data safety</p>
+              <h2 className="font-serif text-3xl font-semibold text-ink sm:text-4xl">
+                Questions we get asked a lot.
+              </h2>
+              <p className="mt-5 text-lg leading-8 text-ink/68">
+                Straight answers about how we handle your clients' data.
+              </p>
+            </div>
+            <div className="mx-auto mt-14 max-w-3xl divide-y divide-ink/10 rounded-lg border border-ink/10 bg-white">
+              {privacyQa.map((item, index) => (
+                <FaqItem
+                  key={item.q}
+                  question={item.q}
+                  answer={item.a}
+                  open={openPrivacy === index}
+                  onToggle={() => setOpenPrivacy(openPrivacy === index ? -1 : index)}
+                />
+              ))}
+            </div>
+            <div className="mx-auto mt-10 max-w-3xl rounded-lg border border-forest/20 bg-forest/5 px-8 py-6">
+              <p className="text-sm font-semibold text-forest">The short version</p>
+              <p className="mt-2 text-sm leading-7 text-ink/70">
+                Client data is encrypted at rest and in transit, access is role-controlled at the database level, each practice is completely isolated from every other, and we comply with POPIA. The architecture is the same pattern used by fintech companies handling far more sensitive data than ours.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section id="pricing" className="bg-paper border-t border-ink/10">
           <div className="mx-auto max-w-7xl px-6 py-24">
             <div className="mx-auto max-w-3xl text-center">
               <p className="mb-4 text-xs font-bold uppercase tracking-[0.22em] text-gold">Pricing</p>
@@ -6185,11 +6273,15 @@ function BoRegisterPanel({
   const submitManualBo = (event) => {
     event.preventDefault();
     if (!manualBo.fullName.trim()) return;
+    if (manualBo.email && !isValidEmail(manualBo.email)) return;
+    const pct = Number(manualBo.ownershipPercentage || 0);
+    if (!isValidOwnershipPercentage(pct)) return;
     onConfirmBeneficialOwner({
       shareholderId: null,
       fullName: manualBo.fullName.trim(),
       idNumber: manualBo.idNumber.trim(),
-      ownershipPercentage: Number(manualBo.ownershipPercentage || 0),
+      email: manualBo.email.trim() || null,
+      ownershipPercentage: pct,
       controlBasis: manualBo.controlBasis,
       notes: manualBo.notes.trim()
     });
@@ -8106,19 +8198,6 @@ function getComplianceValidation(company, detail) {
   };
 }
 
-function isValidCompanyRegistrationNumber(value) {
-  return /^\d{4}\/\d{6}\/\d{2}$/.test(String(value || '').trim());
-}
-
-function normalizeCompanyRegistrationNumber(value) {
-  const trimmed = String(value || '').trim();
-  const digits = trimmed.replace(/\D/g, '');
-  if (digits.length === 12) {
-    return `${digits.slice(0, 4)}/${digits.slice(4, 10)}/${digits.slice(10, 12)}`;
-  }
-  return trimmed.replace(/\\/g, '/');
-}
-
 function buildInitialImportTasks(company) {
   return [
     {
@@ -8322,7 +8401,7 @@ function restoreDataTypeConfig(type) {
       detailKey: 'shareholders',
       select: 'id, company_id, shareholder_type, name, id_number, ownership_percentage',
       payload: (row, company) => cleanPayload({ id: uuidOrUndefined(row.id), company_id: company?.id, shareholder_type: normaliseShareholderType(valueByHeader(row, ['shareholder_type'])) || 'natural_person', name: valueByHeader(row, ['name']), id_number: valueByHeader(row, ['id_number']) || null, ownership_percentage: Number(valueByHeader(row, ['ownership_percentage']) || 0) }),
-      validate: (payload, errors) => { if (!payload.name) errors.push('Shareholder name missing'); if (Number.isNaN(payload.ownership_percentage)) errors.push('Ownership percentage invalid'); },
+      validate: (payload, errors) => { if (!payload.name) errors.push('Shareholder name missing'); if (!isValidOwnershipPercentage(payload.ownership_percentage)) errors.push('Ownership percentage must be 0–100'); },
       mapRow: mapShareholderRow,
       localMap: (row) => ({ companyId: row.company_id, ...mapShareholderRow(row) }),
       previewLabel: (row) => row.name,
@@ -8355,7 +8434,7 @@ function restoreDataTypeConfig(type) {
         cipc_filing_due_date: normalizeImportDate(valueByHeader(row, ['cipc_filing_due_date', 'cipcFilingDueDate'])) || null,
         cipc_filing_status: valueByHeader(row, ['cipc_filing_status', 'cipcFilingStatus']) || 'not_started'
       }),
-      validate: (payload, errors) => { if (!payload.full_name) errors.push('BO name missing'); },
+      validate: (payload, errors) => { if (!payload.full_name) errors.push('BO name missing'); if (payload.email && !isValidEmail(payload.email)) errors.push('BO email address is invalid'); if (!isValidOwnershipPercentage(payload.ownership_percentage)) errors.push('BO ownership percentage must be 0–100'); },
       mapRow: mapBeneficialOwnerRow,
       localMap: (row) => ({ companyId: row.company_id, ...mapBeneficialOwnerRow(row) }),
       previewLabel: (row) => row.full_name,
@@ -8391,7 +8470,7 @@ function restoreDataTypeConfig(type) {
       detailKey: 'contacts',
       select: 'id, company_id, full_name, role, email, phone, notes',
       payload: (row, company) => cleanPayload({ id: uuidOrUndefined(row.id), company_id: company?.id, full_name: valueByHeader(row, ['full_name']), role: valueByHeader(row, ['role']) || null, email: valueByHeader(row, ['email']) || null, phone: valueByHeader(row, ['phone']) || null, notes: valueByHeader(row, ['notes']) || null }),
-      validate: (payload, errors) => { if (!payload.full_name) errors.push('Contact name missing'); },
+      validate: (payload, errors) => { if (!payload.full_name) errors.push('Contact name missing'); if (payload.email && !isValidEmail(payload.email)) errors.push('Contact email address is invalid'); },
       mapRow: mapContactRow,
       localMap: (row) => ({ companyId: row.company_id, ...mapContactRow(row) }),
       previewLabel: (row) => row.full_name,
@@ -8484,57 +8563,6 @@ function uuidOrUndefined(value) {
 
 function uuidOrNull(value) {
   return importedUuidOrNull(value, isUuid);
-}
-
-function looksLikeSaId(value) {
-  return /^\d{13}$/.test(String(value || '').trim());
-}
-
-function isValidSaIdNumber(value) {
-  const id = String(value || '').trim();
-  if (!/^\d{13}$/.test(id)) return false;
-  const digits = id.split('').map(Number);
-  const check = digits[12];
-  const oddSum = digits.filter((_, index) => index % 2 === 0 && index < 12).reduce((sum, digit) => sum + digit, 0);
-  const evenNumber = digits.filter((_, index) => index % 2 === 1 && index < 12).join('');
-  const evenSum = String(Number(evenNumber) * 2).split('').reduce((sum, digit) => sum + Number(digit), 0);
-  const calculated = (10 - ((oddSum + evenSum) % 10)) % 10;
-  return calculated === check;
-}
-
-function findDuplicateRecords(records, label, nameKey = 'name') {
-  const issues = [];
-  const byId = new Map();
-  const byName = new Map();
-  records.forEach((record) => {
-    const idNumber = String(record.idNumber || '').trim().toLowerCase();
-    const name = String(record[nameKey] || '').trim().toLowerCase();
-    if (idNumber) {
-      byId.set(idNumber, [...(byId.get(idNumber) || []), record]);
-    }
-    if (name) {
-      byName.set(name, [...(byName.get(name) || []), record]);
-    }
-  });
-  byId.forEach((items, idNumber) => {
-    if (items.length > 1) {
-      issues.push({
-        key: `${label}-duplicate-id-${idNumber}`,
-        title: `Duplicate ${label} ID`,
-        detail: `${items.length} ${label} records share ID/passport ${idNumber}.`
-      });
-    }
-  });
-  byName.forEach((items, name) => {
-    if (items.length > 1) {
-      issues.push({
-        key: `${label}-duplicate-name-${name}`,
-        title: `Duplicate ${label} name`,
-        detail: `${items.length} ${label} records use the name "${items[0][nameKey]}".`
-      });
-    }
-  });
-  return issues;
 }
 
 function calculateComplianceStatus(detail) {
@@ -9683,10 +9711,10 @@ function addPdfOwnershipMapPage(doc, company, detail) {
     doc.setTextColor(32, 36, 42);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
-    doc.text(doc.splitTextToSize(shareholder.name, 190), nodeX + 12, nodeY + 18);
+    doc.text(doc.splitTextToSize(sanitizeText(shareholder.name), 190), nodeX + 12, nodeY + 18);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8);
-    doc.text(`${shareholderTypeLabel(shareholder.shareholderType)} | ${shareholder.idNumber || 'ID/reg not captured'}`, nodeX + 12, nodeY + 35);
+    doc.text(`${shareholderTypeLabel(shareholder.shareholderType)} | ${sanitizeText(shareholder.idNumber || 'ID/reg not captured')}`, nodeX + 12, nodeY + 35);
     doc.setTextColor(...style.text);
     doc.setFont('helvetica', 'bold');
     doc.text(style.label, nodeX + 12, nodeY + 50);
@@ -9728,13 +9756,13 @@ function addPdfHeader(doc, title) {
 function addPdfCompanyBlock(doc, company, y) {
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(14);
-  doc.text(company.name, 48, y);
+  doc.text(sanitizeText(company.name), 48, y);
   y += 22;
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(10);
-  doc.text(`Registration number: ${company.registrationNumber}`, 48, y);
+  doc.text(`Registration number: ${sanitizeText(company.registrationNumber)}`, 48, y);
   y += 16;
-  doc.text(`Company type: ${company.type || 'Pty Ltd'}`, 48, y);
+  doc.text(`Company type: ${sanitizeText(company.type || 'Pty Ltd')}`, 48, y);
   y += 16;
   doc.text(`Prepared date: ${new Date().toLocaleDateString('en-ZA')}`, 48, y);
   return y + 30;

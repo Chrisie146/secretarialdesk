@@ -1,7 +1,10 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.104.1';
 
+const ALLOWED_ORIGIN = Deno.env.get('ALLOWED_ORIGIN') ?? 'https://secretarialdesk.netlify.app';
+const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+
 const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
   'Access-Control-Max-Age': '86400'
@@ -83,9 +86,18 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: message }, 500);
     }
 
+    if (fileData.size > MAX_FILE_BYTES) {
+      const message = `Document exceeds maximum allowed size of ${MAX_FILE_BYTES / 1024 / 1024} MB.`;
+      await markFailed(supabase, jobId, documentId, message);
+      return jsonResponse({ error: message }, 413);
+    }
+
     const base64 = await blobToBase64(fileData);
     const analysisType = allowedJob.analysis_type || 'company_onboarding';
-    const extracted = await analyzeDocument(base64, documentRecord.original_filename || 'company-document.pdf', analysisType);
+    const safeFilename = (documentRecord.original_filename || 'company-document.pdf')
+      .replace(/[^a-zA-Z0-9._\- ]/g, '')
+      .slice(0, 100);
+    const extracted = await analyzeDocument(base64, safeFilename, analysisType);
 
     await supabase
       .from('documents')
