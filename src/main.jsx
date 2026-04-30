@@ -33,205 +33,24 @@ import {
   X
 } from 'lucide-react';
 import './styles.css';
+import {
+  BENEFICIAL_OWNER_SELECT,
+  BENEFICIAL_OWNER_SELECT_WITH_COMPANY,
+  STORAGE_KEYS,
+  VALID_COMPANY_DETAIL_TABS,
+  VALID_WORKSPACE_VIEWS,
+  beneficialOwnerControlBasisOptions
+} from './data/appConstants';
+import { initialCompanies, initialCompanyDetails } from './data/demoData';
+import {
+  createDefaultDatabaseFeatures,
+  databaseFeatureStatusFromError,
+  databaseFeatureUnavailableMessage
+} from './services/databaseFeatures';
+import { buildPermissions, roleLabel } from './services/permissions';
 import { hasSupabaseConfig, supabase } from './supabaseClient';
-
-const STORAGE_KEYS = {
-  workspaceView: 'secretarialdesk.workspaceView',
-  selectedCompanyId: 'secretarialdesk.selectedCompanyId',
-  companyDetailTab: 'secretarialdesk.companyDetailTab'
-};
-
-const VALID_WORKSPACE_VIEWS = ['dashboard', 'companies', 'deadlines', 'trusts', 'documents', 'filingPack', 'followUps', 'settings'];
-const VALID_COMPANY_DETAIL_TABS = ['shareholders', 'ownershipMap', 'boRegister', 'directors', 'contacts', 'tasks', 'activity'];
-const BENEFICIAL_OWNER_SELECT = 'id, shareholder_id, full_name, id_number, ownership_percentage, control_basis, notes, date_of_birth, address, email, nationality_status, country_of_birth, passport_issuing_country, verification_status, verification_document_id, interest_held, last_changed_at, cipc_filing_due_date, cipc_filing_status, created_at';
-const BENEFICIAL_OWNER_SELECT_WITH_COMPANY = `company_id, ${BENEFICIAL_OWNER_SELECT}`;
-
-function readStoredValue(key) {
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function writeStoredValue(key, value) {
-  try {
-    if (value === null || value === undefined || value === '') {
-      window.localStorage.removeItem(key);
-    } else {
-      window.localStorage.setItem(key, String(value));
-    }
-  } catch {
-    // Ignore storage failures so private browsing or locked storage never breaks the app.
-  }
-}
-
-const initialCompanies = [
-  {
-    id: 1,
-    name: 'Mafadi Consulting Pty Ltd',
-    registrationNumber: '2021/123456/07',
-    type: 'Pty Ltd',
-    incorporationDate: '2021-02-12',
-    status: 'Compliant',
-    nextDueDate: '12 Feb 2026',
-    nextDueDateRaw: '2026-02-12',
-    shareholders: 4
-  },
-  {
-    id: 2,
-    name: 'Ikhaya Holdings Pty Ltd',
-    registrationNumber: '2020/987654/07',
-    type: 'Pty Ltd',
-    incorporationDate: '2020-06-03',
-    status: 'Due Soon',
-    nextDueDate: '03 Jun 2026',
-    nextDueDateRaw: '2026-06-03',
-    shareholders: 7
-  },
-  {
-    id: 3,
-    name: 'Thanda Operations Pty Ltd',
-    registrationNumber: '2019/456789/07',
-    type: 'Pty Ltd',
-    incorporationDate: '2019-05-15',
-    status: 'Action Required',
-    nextDueDate: '15 May 2026',
-    nextDueDateRaw: '2026-05-15',
-    shareholders: 3
-  }
-];
-
-const initialCompanyDetails = {
-  1: {
-    directors: [
-      { id: 'd-1', fullName: 'Nomsa Dlamini', idNumber: '8001015009087', appointmentDate: '2021-02-12' }
-    ],
-    shareholders: [
-      { id: 's-1', shareholderType: 'natural_person', name: 'Nomsa Dlamini', idNumber: '8001015009087', ownershipPercentage: 62 },
-      { id: 's-2', shareholderType: 'natural_person', name: 'Johan Botha', idNumber: '7905055009081', ownershipPercentage: 38 }
-    ],
-    beneficialOwners: [
-      { id: 'bo-1', shareholderId: 's-1', fullName: 'Nomsa Dlamini', idNumber: '8001015009087', ownershipPercentage: 62, controlBasis: 'Direct shareholding above 5%' }
-    ],
-    trustReviews: [],
-    entityOwnershipReviews: [],
-    directorChanges: [],
-    shareTransactions: [],
-    documents: [
-      { id: 'doc-1', documentType: 'share_register', originalFilename: 'Mafadi share register.pdf' },
-      { id: 'doc-2', documentType: 'mandate_to_file', originalFilename: 'Mandate to file.pdf' }
-    ],
-    contacts: [
-      { id: 'c-1', fullName: 'Nomsa Dlamini', role: 'Director', email: 'nomsa@example.co.za', phone: '+27 82 000 0000', notes: 'Primary mandate signatory.' }
-    ],
-    tasks: [
-      { id: 't-1', title: 'Confirm signed mandate', taskType: 'Mandate', dueDate: '2026-05-05', status: 'open', contactId: 'c-1', notes: 'Send final mandate after BO register review.' }
-    ],
-    activity: [
-      { id: 'a-1', action: 'shareholder_added', subjectType: 'shareholder', details: { label: 'Nomsa Dlamini added as beneficial owner' }, createdAt: '2026-04-25T08:00:00Z' }
-    ],
-    filingPacks: [],
-    mandatePrepared: true
-  },
-  2: {
-    directors: [
-      { id: 'd-2', fullName: 'Ayesha Khan', idNumber: '8508120087082', appointmentDate: '2020-08-01' }
-    ],
-    shareholders: [
-      { id: 's-3', shareholderType: 'trust', name: 'Ikhaya Family Trust', idNumber: '', ownershipPercentage: 55 },
-      { id: 's-4', shareholderType: 'company', name: 'Cape Growth Holdings Pty Ltd', idNumber: '', ownershipPercentage: 45 }
-    ],
-    beneficialOwners: [],
-    trustReviews: [],
-    entityOwnershipReviews: [],
-    directorChanges: [],
-    shareTransactions: [],
-    documents: [
-      { id: 'doc-3', documentType: 'share_register', originalFilename: 'Ikhaya share register.pdf' }
-    ],
-    contacts: [
-      { id: 'c-2', fullName: 'Ayesha Khan', role: 'Director', email: 'ayesha@example.co.za', phone: '+27 83 000 0000', notes: 'Request Trust Deed before filing.' }
-    ],
-    tasks: [
-      { id: 't-2', title: 'Request Ikhaya Family Trust Deed', taskType: 'Trust Deed', dueDate: '2026-05-03', status: 'open', contactId: 'c-2', notes: 'Needed before BO finalisation.' }
-    ],
-    activity: [
-      { id: 'a-2', action: 'task_created', subjectType: 'task', details: { label: 'Trust Deed request created' }, createdAt: '2026-04-25T10:30:00Z' }
-    ],
-    filingPacks: [],
-    mandatePrepared: false
-  },
-  3: {
-    directors: [],
-    shareholders: [],
-    beneficialOwners: [],
-    trustReviews: [],
-    entityOwnershipReviews: [],
-    directorChanges: [],
-    shareTransactions: [],
-    documents: [],
-    contacts: [],
-    tasks: [],
-    activity: [],
-    filingPacks: [],
-    mandatePrepared: false
-  }
-};
-
-const beneficialOwnerControlBasisOptions = [
-  'Direct shareholding above 5%',
-  'Indirect ownership',
-  'Voting rights',
-  'Trustee / trust controller',
-  'Beneficiary',
-  'Founder / settlor',
-  'Board appointment rights',
-  'Other effective control'
-];
-
-function createDatabaseFeatureStatus(overrides = {}) {
-  return {
-    available: true,
-    checked: false,
-    setupRequired: false,
-    error: '',
-    ...overrides
-  };
-}
-
-function createDefaultDatabaseFeatures() {
-  return {
-    directorChanges: createDatabaseFeatureStatus(),
-    shareTransactions: createDatabaseFeatureStatus()
-  };
-}
-
-function isMissingRelationError(error) {
-  if (!error) return false;
-  const message = String(error.message || '').toLowerCase();
-  return error.code === '42P01' ||
-    message.includes('does not exist') ||
-    message.includes('could not find the table') ||
-    message.includes('schema cache');
-}
-
-function databaseFeatureStatusFromError(error) {
-  if (!error) return createDatabaseFeatureStatus({ checked: true });
-  return createDatabaseFeatureStatus({
-    available: false,
-    checked: true,
-    setupRequired: isMissingRelationError(error),
-    error: error.message || 'Database access is unavailable for this workflow.'
-  });
-}
-
-function databaseFeatureUnavailableMessage(label, feature) {
-  if (feature?.setupRequired) {
-    return `${label} requires migration 016_secretarial_filing_workflows.sql to be run in Supabase. Existing company records can still be viewed.`;
-  }
-  return feature?.error || `${label} is temporarily unavailable.`;
-}
+import { addBusinessDays, addDays, calculateNextAnnualReturnDue, formatCompanyDueDate, todayIsoDate } from './utils/dates';
+import { readStoredValue, writeStoredValue } from './utils/storage';
 
 class AppErrorBoundary extends React.Component {
   constructor(props) {
@@ -3341,36 +3160,6 @@ function mapCompanyRow(row) {
     nextDueDateRaw: row.next_due_date || null,
     shareholders: Array.isArray(row.shareholders) ? row.shareholders.length : 0
   };
-}
-
-function buildPermissions(role) {
-  const normalizedRole = role || 'read_only';
-  const canManagePractice = normalizedRole === 'owner';
-  const canEditCompany = ['owner', 'admin', 'member'].includes(normalizedRole);
-  const canEditBoRecords = ['owner', 'admin', 'member'].includes(normalizedRole);
-  const canGenerateFilingPack = ['owner', 'admin'].includes(normalizedRole);
-  const canSubmitFiling = ['owner', 'admin'].includes(normalizedRole);
-  const canDeleteRecords = ['owner', 'admin'].includes(normalizedRole);
-
-  return {
-    role: normalizedRole,
-    canManagePractice,
-    canEditCompany,
-    canEditBoRecords,
-    canGenerateFilingPack,
-    canSubmitFiling,
-    canDeleteRecords,
-    isReadOnly: !canEditCompany
-  };
-}
-
-function roleLabel(role) {
-  return {
-    owner: 'Owner',
-    admin: 'Admin',
-    member: 'Member',
-    read_only: 'Read-only'
-  }[role] || 'Read-only';
 }
 
 function createEmptyCompanyDetail() {
@@ -9257,49 +9046,6 @@ function findDuplicateRecords(records, label, nameKey = 'name') {
 
 function calculateComplianceStatus(detail) {
   return getReadinessChecklist(detail).status;
-}
-
-function todayIsoDate() {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function formatCompanyDueDate(value) {
-  return value ? new Date(`${value}T00:00:00`).toLocaleDateString('en-ZA', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not set';
-}
-
-function calculateNextAnnualReturnDue(incorporationDate, afterDate = todayIsoDate()) {
-  if (!incorporationDate) return null;
-  const incorporation = new Date(`${incorporationDate}T00:00:00`);
-  const after = new Date(`${afterDate}T00:00:00`);
-  if (Number.isNaN(incorporation.getTime()) || Number.isNaN(after.getTime())) return null;
-
-  let year = after.getFullYear();
-  let anniversary = new Date(year, incorporation.getMonth(), incorporation.getDate());
-  let due = addBusinessDays(anniversary, 30);
-  while (due <= after) {
-    year += 1;
-    anniversary = new Date(year, incorporation.getMonth(), incorporation.getDate());
-    due = addBusinessDays(anniversary, 30);
-  }
-  return due.toISOString().slice(0, 10);
-}
-
-function addDays(date, days) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-}
-
-function addBusinessDays(date, days) {
-  const next = new Date(date);
-  if (Number.isNaN(next.getTime())) return addDays(new Date(), days);
-  let added = 0;
-  while (added < days) {
-    next.setDate(next.getDate() + 1);
-    const day = next.getDay();
-    if (day !== 0 && day !== 6) added += 1;
-  }
-  return next;
 }
 
 function annualReturnStatus(dueDate) {
