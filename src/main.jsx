@@ -3503,6 +3503,13 @@ function Landing({ onEnter }) {
   const [openFaq, setOpenFaq] = useState(0);
   const [openPrivacy, setOpenPrivacy] = useState(-1);
 
+  const scrollToSection = (e, href) => {
+    e.preventDefault();
+    const id = href.replace('#', '');
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   const privacyQa = [
     {
       q: 'How is my data kept safe?',
@@ -3565,7 +3572,7 @@ function Landing({ onEnter }) {
           <BrandMark />
           <nav className="hidden items-center gap-9 text-sm font-medium text-ink/70 lg:flex">
             {navItems.map((item) => (
-              <a key={item.href} href={item.href} className="transition hover:text-ink">{item.label}</a>
+              <a key={item.href} href={item.href} onClick={(e) => scrollToSection(e, item.href)} className="transition hover:text-ink">{item.label}</a>
             ))}
           </nav>
           <div className="hidden items-center gap-3 lg:flex">
@@ -3588,7 +3595,7 @@ function Landing({ onEnter }) {
           <div className="border-t border-ink/10 bg-white px-6 py-5 lg:hidden">
             <div className="flex flex-col gap-4 text-sm font-medium text-ink/75">
               {navItems.map((item) => (
-                <a key={item.href} href={item.href} onClick={() => setMobileMenuOpen(false)}>{item.label}</a>
+                <a key={item.href} href={item.href} onClick={(e) => { scrollToSection(e, item.href); setMobileMenuOpen(false); }}>{item.label}</a>
               ))}
             </div>
             <div className="mt-5 flex flex-col gap-2">
