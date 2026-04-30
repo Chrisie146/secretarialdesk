@@ -71,7 +71,19 @@ import { hasSupabaseConfig, supabase } from './supabaseClient';
 import { inferBoInterestHeld } from './features/beneficial-ownership/boUtils';
 import { documentLabel } from './features/documents/documentUtils';
 import { normaliseShareholderType } from './features/shareholders/shareholderUtils';
+import { csvCell, csvValue, downloadBlob, downloadRowsCsv, downloadTableCsv, downloadTextFile, fileSafeName } from './utils/csv';
 import { addBusinessDays, addDays, calculateNextAnnualReturnDue, formatCompanyDueDate, todayIsoDate } from './utils/dates';
+import {
+  cleanPayload,
+  normalizeHeader,
+  normalizeImportDate,
+  parseBool,
+  parseDelimitedText,
+  parseJsonCell,
+  uuidOrNull as importedUuidOrNull,
+  uuidOrUndefined as importedUuidOrUndefined,
+  valueByHeader
+} from './utils/importParsing';
 import { readStoredValue, writeStoredValue } from './utils/storage';
 
 class AppErrorBoundary extends React.Component {
@@ -7925,32 +7937,6 @@ function buildBoRegisterRows(shareholders, beneficialOwners = [], trustReviews =
   });
 }
 
-function csvValue(value) {
-  const text = typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value ?? '');
-  return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
-}
-
-function downloadRowsCsv(filename, rows) {
-  const headers = Array.from(rows.reduce((set, row) => {
-    Object.keys(row || {}).forEach((key) => set.add(key));
-    return set;
-  }, new Set()));
-  const csv = [
-    headers,
-    ...rows.map((row) => headers.map((header) => row?.[header]))
-  ].map((row) => row.map(csvValue).join(',')).join('\n');
-  downloadTextFile(filename, csv, 'text/csv');
-}
-
-function downloadTableCsv(filename, rows, columns) {
-  const headers = columns.map(([header]) => header);
-  const csv = [
-    headers,
-    ...rows.map((row) => columns.map(([, key]) => row?.[key]))
-  ].map((row) => row.map(csvValue).join(',')).join('\n');
-  downloadTextFile(filename, csv, 'text/csv');
-}
-
 function downloadCachedPracticeData(baseName, stamp, companies, companyDetails) {
   const detailRows = (key, mapper) => companies.flatMap((company) => {
     const detail = companyDetails[company.id] || createEmptyCompanyDetail();
@@ -8405,68 +8391,6 @@ function parseBulkCompanyRows(text, existingCompanies) {
     });
 }
 
-function parseDelimitedText(text) {
-  const source = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
-  if (!source) return [];
-  const delimiter = source.includes('\t') ? '\t' : source.includes(';') && !source.includes(',') ? ';' : ',';
-  const rows = [];
-  let row = [];
-  let cell = '';
-  let inQuotes = false;
-
-  for (let index = 0; index < source.length; index += 1) {
-    const char = source[index];
-    const next = source[index + 1];
-    if (char === '"' && next === '"' && inQuotes) {
-      cell += '"';
-      index += 1;
-    } else if (char === '"') {
-      inQuotes = !inQuotes;
-    } else if (char === delimiter && !inQuotes) {
-      row.push(cell.trim());
-      cell = '';
-    } else if (char === '\n' && !inQuotes) {
-      row.push(cell.trim());
-      rows.push(row);
-      row = [];
-      cell = '';
-    } else {
-      cell += char;
-    }
-  }
-  row.push(cell.trim());
-  rows.push(row);
-  return rows;
-}
-
-function normalizeHeader(value) {
-  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-}
-
-function valueByHeader(rowObject, aliases) {
-  for (const alias of aliases) {
-    const normalized = normalizeHeader(alias);
-    if (rowObject[normalized]) return rowObject[normalized];
-  }
-  return '';
-}
-
-function normalizeImportDate(value) {
-  const trimmed = String(value || '').trim();
-  if (!trimmed) return '';
-  if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed.slice(0, 10);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
-  const slashMatch = trimmed.match(/^(\d{4})[\/](\d{1,2})[\/](\d{1,2})$/);
-  if (slashMatch) {
-    return `${slashMatch[1]}-${slashMatch[2].padStart(2, '0')}-${slashMatch[3].padStart(2, '0')}`;
-  }
-  const southAfricanMatch = trimmed.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
-  if (southAfricanMatch) {
-    return `${southAfricanMatch[3]}-${southAfricanMatch[2].padStart(2, '0')}-${southAfricanMatch[1].padStart(2, '0')}`;
-  }
-  return '';
-}
-
 function parsePracticeRestoreRows(text, companies) {
   const rawRows = parseDelimitedText(text);
   if (rawRows.length < 2) return { type: '', rows: [] };
@@ -8730,30 +8654,12 @@ function restoreCompanyLabel(rowObject) {
     valueByHeader(rowObject, ['company_id']);
 }
 
-function parseJsonCell(value, fallback) {
-  if (!value) return fallback;
-  try {
-    const parsed = JSON.parse(value);
-    return parsed ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function parseBool(value) {
-  return ['true', '1', 'yes', 'y', 'received', 'accepted'].includes(String(value || '').trim().toLowerCase());
-}
-
 function uuidOrUndefined(value) {
-  return isUuid(value) ? value : undefined;
+  return importedUuidOrUndefined(value, isUuid);
 }
 
 function uuidOrNull(value) {
-  return isUuid(value) ? value : null;
-}
-
-function cleanPayload(payload) {
-  return Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== undefined));
+  return importedUuidOrNull(value, isUuid);
 }
 
 function looksLikeSaId(value) {
@@ -10044,31 +9950,6 @@ function addPdfFooter(doc) {
     doc.text(`Generated by SecretarialDesk | Page ${page} of ${pageCount}`, 48, 820);
     doc.setTextColor(32, 36, 42);
   }
-}
-
-function csvCell(value) {
-  const text = String(value ?? '');
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
-
-function downloadTextFile(filename, contents, type) {
-  const blob = new Blob([contents], { type });
-  downloadBlob(filename, blob);
-}
-
-function downloadBlob(filename, blob) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-function fileSafeName(name) {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'company';
 }
 
 function shareholderTypeLabel(type) {
