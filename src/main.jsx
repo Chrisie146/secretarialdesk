@@ -43,6 +43,8 @@ const STORAGE_KEYS = {
 
 const VALID_WORKSPACE_VIEWS = ['dashboard', 'companies', 'deadlines', 'trusts', 'documents', 'filingPack', 'followUps', 'settings'];
 const VALID_COMPANY_DETAIL_TABS = ['shareholders', 'ownershipMap', 'boRegister', 'directors', 'contacts', 'tasks', 'activity'];
+const BENEFICIAL_OWNER_SELECT = 'id, shareholder_id, full_name, id_number, ownership_percentage, control_basis, notes, date_of_birth, address, email, nationality_status, country_of_birth, passport_issuing_country, verification_status, verification_document_id, interest_held, last_changed_at, cipc_filing_due_date, cipc_filing_status, created_at';
+const BENEFICIAL_OWNER_SELECT_WITH_COMPANY = `company_id, ${BENEFICIAL_OWNER_SELECT}`;
 
 function readStoredValue(key) {
   try {
@@ -1550,7 +1552,7 @@ function App() {
       const tableExports = [
         { table: 'directors', filename: 'directors', columns: 'id, company_id, full_name, id_number, appointment_date' },
         { table: 'shareholders', filename: 'shareholders', columns: 'id, company_id, shareholder_type, name, id_number, ownership_percentage' },
-        { table: 'beneficial_owners', filename: 'beneficial-owners', columns: 'id, company_id, shareholder_id, full_name, id_number, ownership_percentage, control_basis, notes, created_at' },
+        { table: 'beneficial_owners', filename: 'beneficial-owners', columns: BENEFICIAL_OWNER_SELECT_WITH_COMPANY },
         { table: 'trust_reviews', filename: 'trust-reviews', columns: 'id, company_id, shareholder_id, trustees, beneficiaries, founders, controllers, notes, reviewed_at, created_at' },
         { table: 'entity_ownership_reviews', filename: 'entity-ownership-reviews', columns: 'id, company_id, shareholder_id, owners, notes, reviewed_at, created_at' },
         { table: 'company_contacts', filename: 'contacts', columns: 'id, company_id, full_name, role, email, phone, notes' },
@@ -1719,7 +1721,7 @@ function App() {
     ] = await Promise.all([
       supabase.from('directors').select('id, full_name, id_number, appointment_date').eq('company_id', company.id).order('created_at', { ascending: false }),
       supabase.from('shareholders').select('id, shareholder_type, name, id_number, ownership_percentage').eq('company_id', company.id).order('created_at', { ascending: false }),
-      supabase.from('beneficial_owners').select('id, shareholder_id, full_name, id_number, ownership_percentage, control_basis, notes, created_at').eq('company_id', company.id).order('created_at', { ascending: false }),
+      supabase.from('beneficial_owners').select(BENEFICIAL_OWNER_SELECT).eq('company_id', company.id).order('created_at', { ascending: false }),
       supabase.from('trust_reviews').select('id, shareholder_id, trust_profile_id, trustees, beneficiaries, founders, controllers, notes, reviewed_at, created_at').eq('company_id', company.id).order('reviewed_at', { ascending: false }),
       supabase.from('entity_ownership_reviews').select('id, shareholder_id, owners, notes, reviewed_at, created_at').eq('company_id', company.id).order('reviewed_at', { ascending: false }),
       supabase.from('documents').select('id, document_type, original_filename, file_path, status').eq('company_id', company.id).order('created_at', { ascending: false }),
@@ -2241,50 +2243,49 @@ function App() {
   const confirmBeneficialOwner = async (owner) => {
     if (!selectedCompany) return;
     if (!requirePermission(permissions.canEditBoRecords, 'Your role cannot confirm beneficial owners.')) return;
-    const payload = {
-      shareholderId: owner.shareholderId || null,
-      fullName: owner.fullName,
-      idNumber: owner.idNumber || '',
-      ownershipPercentage: Number(owner.ownershipPercentage || 0),
-      controlBasis: owner.controlBasis || 'Direct shareholding above 5%',
-      notes: owner.notes || ''
-    };
+    const existingDetail = companyDetails[selectedCompany.id] || createEmptyCompanyDetail();
+    const existingOwner = owner.id ? existingDetail.beneficialOwners.find((item) => String(item.id) === String(owner.id)) : null;
+    const payload = normalizeBeneficialOwnerFilingPayload(owner, selectedCompany, existingOwner);
+    const isUpdate = Boolean(owner.id);
+    const previousSnapshot = existingOwner ? auditSnapshot(existingOwner) : null;
     const auditDetails = {
       label: payload.fullName,
-      summary: `${payload.fullName} confirmed as a beneficial owner at ${payload.ownershipPercentage}%`,
+      summary: `${payload.fullName} ${isUpdate ? 'updated in' : 'confirmed as'} a beneficial owner filing record at ${payload.ownershipPercentage}%`,
       ownershipPercentage: payload.ownershipPercentage,
       controlBasis: payload.controlBasis,
+      shareholderId: owner.shareholderId || null,
       sourceShareholderId: payload.shareholderId,
+      before: previousSnapshot,
       after: auditSnapshot(payload)
     };
+    const dbPayload = beneficialOwnerDbPayload(payload);
 
     if (hasSupabaseConfig && session) {
       setIsSavingDetail(true);
-      const { data, error } = await supabase
-        .from('beneficial_owners')
-        .insert({
-          company_id: selectedCompany.id,
-          shareholder_id: isUuid(payload.shareholderId) ? payload.shareholderId : null,
-          full_name: payload.fullName,
-          id_number: payload.idNumber || null,
-          ownership_percentage: payload.ownershipPercentage,
-          control_basis: payload.controlBasis,
-          notes: payload.notes || null
-        })
-        .select('id, shareholder_id, full_name, id_number, ownership_percentage, control_basis, notes, created_at')
-        .single();
+      const query = isUpdate
+        ? supabase.from('beneficial_owners').update(dbPayload).eq('id', owner.id)
+        : supabase.from('beneficial_owners').insert({ company_id: selectedCompany.id, ...dbPayload });
+      const { data, error } = await query.select(BENEFICIAL_OWNER_SELECT).single();
       setIsSavingDetail(false);
       if (error) {
         setAppError(error.message);
         return;
       }
-      appendCompanyDetail(selectedCompany.id, 'beneficialOwners', mapBeneficialOwnerRow(data));
-      logActivity({ action: 'beneficial_owner_confirmed', subjectType: 'beneficial_owner', subjectId: data.id, details: auditDetails });
+      if (isUpdate) {
+        replaceCompanyDetail(selectedCompany.id, 'beneficialOwners', owner.id, mapBeneficialOwnerRow(data));
+      } else {
+        appendCompanyDetail(selectedCompany.id, 'beneficialOwners', mapBeneficialOwnerRow(data));
+      }
+      logActivity({ action: isUpdate ? 'beneficial_owner_updated' : 'beneficial_owner_confirmed', subjectType: 'beneficial_owner', subjectId: data.id, details: auditDetails });
       return;
     }
 
-    appendCompanyDetail(selectedCompany.id, 'beneficialOwners', { id: Date.now(), ...payload });
-    logActivity({ action: 'beneficial_owner_confirmed', subjectType: 'beneficial_owner', details: auditDetails });
+    if (isUpdate) {
+      replaceCompanyDetail(selectedCompany.id, 'beneficialOwners', owner.id, { ...existingOwner, ...payload, id: owner.id });
+    } else {
+      appendCompanyDetail(selectedCompany.id, 'beneficialOwners', { id: Date.now(), ...payload, createdAt: new Date().toISOString() });
+    }
+    logActivity({ action: isUpdate ? 'beneficial_owner_updated' : 'beneficial_owner_confirmed', subjectType: 'beneficial_owner', details: auditDetails });
   };
 
   const deleteBeneficialOwner = async (ownerId) => {
@@ -3419,6 +3420,18 @@ function mapBeneficialOwnerRow(row) {
     ownershipPercentage: Number(row.ownership_percentage || 0),
     controlBasis: row.control_basis || '',
     notes: row.notes || '',
+    dateOfBirth: row.date_of_birth || '',
+    address: row.address || '',
+    email: row.email || '',
+    nationalityStatus: row.nationality_status || 'unknown',
+    countryOfBirth: row.country_of_birth || '',
+    passportIssuingCountry: row.passport_issuing_country || '',
+    verificationStatus: row.verification_status || 'not_required',
+    verificationDocumentId: row.verification_document_id || '',
+    interestHeld: row.interest_held || inferBoInterestHeld(row.control_basis),
+    lastChangedAt: row.last_changed_at || '',
+    cipcFilingDueDate: row.cipc_filing_due_date || '',
+    cipcFilingStatus: row.cipc_filing_status || 'not_started',
     createdAt: row.created_at || ''
   };
 }
@@ -5088,7 +5101,7 @@ function CompanyDetail({
     return VALID_COMPANY_DETAIL_TABS.includes(storedTab) ? storedTab : 'shareholders';
   });
   const boAssessment = assessBeneficialOwnership(detail.shareholders, detail.beneficialOwners || [], detail.trustReviews || [], detail.entityOwnershipReviews || []);
-  const readiness = getReadinessChecklist(detail);
+  const readiness = getReadinessChecklist(detail, company);
   const validation = getComplianceValidation(company, detail);
   const canGeneratePack = permissions.canGenerateFilingPack && readiness.status !== 'Action Required' && validation.criticalCount === 0;
   const sectionItems = buildCompanySectionItems(detail, validation);
@@ -5144,6 +5157,7 @@ function CompanyDetail({
                 onCreateBeneficialOwnersFromTrustReview={onCreateBeneficialOwnersFromTrustReview}
                 onSaveEntityOwnershipReview={onSaveEntityOwnershipReview}
                 onCreateBeneficialOwnersFromEntityReview={onCreateBeneficialOwnersFromEntityReview}
+                onAddTask={onAddTask}
                 isSaving={isSaving || !permissions.canEditBoRecords}
                 entityReviewLookup={entityReviewLookup}
                 currentCompanyId={company.id}
@@ -6589,17 +6603,33 @@ function BoRegisterPanel({
   onCreateBeneficialOwnersFromTrustReview,
   onSaveEntityOwnershipReview,
   onCreateBeneficialOwnersFromEntityReview,
+  onAddTask,
   isSaving,
   entityReviewLookup,
   currentCompanyId,
   onSwitchTab
 }) {
-  const emptyManualBo = { fullName: '', idNumber: '', ownershipPercentage: '', controlBasis: 'Indirect ownership', notes: '' };
+  const emptyManualBo = {
+    fullName: '',
+    idNumber: '',
+    ownershipPercentage: '',
+    controlBasis: 'Indirect ownership',
+    notes: '',
+    dateOfBirth: '',
+    address: '',
+    email: '',
+    nationalityStatus: 'unknown',
+    countryOfBirth: '',
+    passportIssuingCountry: '',
+    verificationStatus: 'not_required',
+    interestHeld: 'indirect'
+  };
   const [manualBo, setManualBo] = useState(emptyManualBo);
   const rows = buildBoRegisterRows(shareholders, beneficialOwners, trustReviews, entityOwnershipReviews);
   const confirmedRows = rows.filter((row) => row.status === 'confirmed');
   const reviewRows = rows.filter((row) => row.status === 'review');
   const belowRows = rows.filter((row) => row.status === 'below');
+  const incompleteOwners = beneficialOwners.filter((owner) => beneficialOwnerMissingFields(owner).length > 0);
   const trustPeopleCount = trustReviews.reduce(
     (count, review) => count + review.trustees.length + review.beneficiaries.length + review.founders.length + review.controllers.length,
     0
@@ -6617,7 +6647,29 @@ function BoRegisterPanel({
       ['Generated date', new Date().toLocaleDateString('en-ZA')],
       [],
       ['Name', 'Type', 'ID / registration number', 'Ownership %', 'BO status', 'Action required'],
-      ...rows.map((row) => [row.name, row.typeLabel, row.idNumber, row.ownershipPercentage, row.statusLabel, row.action])
+      ...rows.map((row) => [row.name, row.typeLabel, row.idNumber, row.ownershipPercentage, row.statusLabel, row.action]),
+      [],
+      ['Confirmed BO filing records'],
+      ['Full name', 'ID/passport number', 'Date of birth', 'Address', 'Email', 'Nationality status', 'Country of birth', 'Passport issuing country', 'Ownership %', 'Interest held', 'Control basis', 'Verification status', 'CIPC due date', 'Filing status', 'Missing fields', 'Reviewed at', 'Notes'],
+      ...beneficialOwners.map((owner) => [
+        owner.fullName,
+        owner.idNumber,
+        owner.dateOfBirth,
+        owner.address,
+        owner.email,
+        nationalityStatusLabel(owner.nationalityStatus),
+        owner.countryOfBirth,
+        owner.passportIssuingCountry,
+        owner.ownershipPercentage,
+        interestHeldLabel(owner.interestHeld),
+        owner.controlBasis,
+        verificationStatusLabel(owner.verificationStatus),
+        owner.cipcFilingDueDate,
+        beneficialOwnerFilingStatus(owner),
+        beneficialOwnerMissingFields(owner).join('; '),
+        formatDateTime(owner.lastChangedAt || owner.createdAt),
+        owner.notes
+      ])
     ];
     downloadTextFile(`${fileSafeName(company.name)}-bo-working-register.csv`, csvRows.map((row) => row.map(csvValue).join(',')).join('\n'), 'text/csv');
   };
@@ -6655,14 +6707,15 @@ function BoRegisterPanel({
           <p className="text-xs uppercase tracking-[0.12em]">Stored BO records</p>
           <p className="mt-2 text-2xl font-semibold">{beneficialOwners.length}</p>
         </div>
+        <div className={`rounded-md border p-4 ${incompleteOwners.length ? 'border-red-200 bg-red-50 text-red-900' : 'border-emerald-200 bg-emerald-50 text-emerald-900'}`}>
+          <p className="text-xs uppercase tracking-[0.12em]">CIPC filing details</p>
+          <p className="mt-2 text-2xl font-semibold">{incompleteOwners.length}</p>
+          <p className="mt-1 text-xs">{incompleteOwners.length ? 'BO records incomplete' : 'All BO records complete'}</p>
+        </div>
         <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-amber-900">
           <p className="text-xs uppercase tracking-[0.12em]">Review items</p>
           <p className="mt-2 text-2xl font-semibold">{reviewRows.length}</p>
           {trustPeopleCount > 0 && <p className="mt-1 text-xs">{trustPeopleCount} trust person records captured</p>}
-        </div>
-        <div className="rounded-md border border-ink/10 bg-paper p-4 text-ink/70">
-          <p className="text-xs uppercase tracking-[0.12em]">Below threshold</p>
-          <p className="mt-2 text-2xl font-semibold">{belowRows.length}</p>
         </div>
       </div>
 
@@ -6734,16 +6787,14 @@ function BoRegisterPanel({
         </div>
         <div className="divide-y divide-ink/10">
           {beneficialOwners.map((owner) => (
-            <div key={owner.id} className="flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between">
-              <div>
-                <p className="font-medium">{owner.fullName}</p>
-                <p className="mt-1 text-sm text-ink/55">{owner.idNumber || 'ID not captured'} - {owner.ownershipPercentage}% - {owner.controlBasis}</p>
-                {owner.notes && <p className="mt-1 text-xs leading-5 text-ink/45">{owner.notes}</p>}
-              </div>
-              <button onClick={() => onDeleteBeneficialOwner(owner.id)} disabled={isSaving} className="rounded-md border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50">
-                Remove
-              </button>
-            </div>
+            <BoFilingRecordCard
+              key={owner.id}
+              owner={owner}
+              onSave={onConfirmBeneficialOwner}
+              onDelete={onDeleteBeneficialOwner}
+              onCreateTask={onAddTask}
+              isSaving={isSaving}
+            />
           ))}
           {beneficialOwners.length === 0 && (
             <p className="p-4 text-sm text-ink/55">No confirmed BO filing records yet.</p>
@@ -6759,6 +6810,11 @@ function BoRegisterPanel({
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
           <Field label="Full name" value={manualBo.fullName} onChange={(fullName) => setManualBo({ ...manualBo, fullName })} placeholder="Natural person name" />
           <Field label="ID / passport number" value={manualBo.idNumber} onChange={(idNumber) => setManualBo({ ...manualBo, idNumber })} placeholder="SA ID or passport" />
+          <Field type="date" label="Date of birth" value={manualBo.dateOfBirth} onChange={(dateOfBirth) => setManualBo({ ...manualBo, dateOfBirth })} />
+          <Field type="email" label="Email address" value={manualBo.email} onChange={(email) => setManualBo({ ...manualBo, email })} placeholder="person@example.co.za" />
+          <div className="lg:col-span-2">
+            <Field label="Residential / business / postal address" value={manualBo.address} onChange={(address) => setManualBo({ ...manualBo, address })} placeholder="Address required for CIPC BO declaration" />
+          </div>
           <Field type="number" label="Ownership %" value={manualBo.ownershipPercentage} onChange={(ownershipPercentage) => setManualBo({ ...manualBo, ownershipPercentage })} placeholder="0 if control only" />
           <label className="block">
             <span className="mb-2 block text-sm font-medium">Control basis</span>
@@ -6766,6 +6822,29 @@ function BoRegisterPanel({
               {beneficialOwnerControlBasisOptions.map((option) => <option key={option}>{option}</option>)}
             </select>
           </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-medium">Interest held</span>
+            <select value={manualBo.interestHeld} onChange={(event) => setManualBo({ ...manualBo, interestHeld: event.target.value })} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm">
+              <option value="direct">Direct</option>
+              <option value="indirect">Indirect</option>
+              <option value="direct_and_indirect">Direct and indirect</option>
+              <option value="control">Control</option>
+            </select>
+          </label>
+          <label className="block">
+            <span className="mb-2 block text-sm font-medium">Nationality status</span>
+            <select value={manualBo.nationalityStatus} onChange={(event) => setManualBo({ ...manualBo, nationalityStatus: event.target.value, verificationStatus: event.target.value === 'foreign_national' ? 'required' : 'not_required' })} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm">
+              <option value="unknown">Unknown</option>
+              <option value="south_african">South African</option>
+              <option value="foreign_national">Foreign national</option>
+            </select>
+          </label>
+          {manualBo.nationalityStatus === 'foreign_national' && (
+            <>
+              <Field label="Country of birth" value={manualBo.countryOfBirth} onChange={(countryOfBirth) => setManualBo({ ...manualBo, countryOfBirth })} />
+              <Field label="Passport issuing country" value={manualBo.passportIssuingCountry} onChange={(passportIssuingCountry) => setManualBo({ ...manualBo, passportIssuingCountry })} />
+            </>
+          )}
           <div className="lg:col-span-2">
             <Field label="Notes / reason" value={manualBo.notes} onChange={(notes) => setManualBo({ ...manualBo, notes })} placeholder="Explain the filing judgement or source document" />
           </div>
@@ -6795,6 +6874,186 @@ function BoRegisterPanel({
       />
     </div>
   );
+}
+
+function BoFilingRecordCard({ owner, onSave, onDelete, onCreateTask, isSaving }) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [form, setForm] = useState(owner);
+  const missingFields = beneficialOwnerMissingFields(owner);
+  const filingStatus = beneficialOwnerFilingStatus(owner);
+
+  useEffect(() => {
+    setForm(owner);
+  }, [owner]);
+
+  const submit = (event) => {
+    event.preventDefault();
+    onSave({ ...owner, ...form, id: owner.id });
+    setIsEditing(false);
+  };
+  const createFollowUpTask = () => {
+    const missing = beneficialOwnerMissingFields(owner);
+    onCreateTask({
+      title: `Complete BO filing details for ${owner.fullName}`,
+      taskType: owner.nationalityStatus === 'foreign_national' ? 'Foreign verification' : 'BO Register',
+      contactId: '',
+      dueDate: owner.cipcFilingDueDate || addBusinessDays(new Date(), 5).toISOString().slice(0, 10),
+      status: 'open',
+      notes: missing.length
+        ? `Capture required CIPC BO fields: ${missing.join(', ')}.`
+        : 'Review and confirm CIPC BO filing details.'
+    });
+  };
+
+  return (
+    <div className="p-4">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div>
+          <p className="font-medium">{owner.fullName}</p>
+          <p className="mt-1 text-sm text-ink/55">
+            {owner.idNumber || 'ID not captured'} - {owner.ownershipPercentage}% - {owner.controlBasis}
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <BoFilingStatusBadge status={filingStatus} />
+            {owner.cipcFilingDueDate && <span className="rounded-full border border-ink/10 bg-paper px-2 py-1 text-xs font-semibold text-ink/60">Due {owner.cipcFilingDueDate}</span>}
+            {missingFields.map((field) => (
+              <span key={field} className="rounded-full border border-red-200 bg-red-50 px-2 py-1 text-xs font-semibold text-red-700">{field} missing</span>
+            ))}
+          </div>
+          {owner.notes && <p className="mt-2 text-xs leading-5 text-ink/45">{owner.notes}</p>}
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <button type="button" onClick={() => setIsEditing((current) => !current)} disabled={isSaving} className="rounded-md border border-gold/60 px-3 py-2 text-xs font-semibold text-gold hover:bg-gold/5 disabled:opacity-50">
+            {isEditing ? 'Close' : 'Edit filing details'}
+          </button>
+          {missingFields.length > 0 && onCreateTask && (
+            <button type="button" onClick={createFollowUpTask} disabled={isSaving} className="rounded-md border border-ink/15 px-3 py-2 text-xs font-semibold text-ink/65 hover:bg-paper disabled:opacity-50">
+              Create follow-up
+            </button>
+          )}
+          <button onClick={() => onDelete(owner.id)} disabled={isSaving} className="rounded-md border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50">
+            Remove
+          </button>
+        </div>
+      </div>
+
+      {isEditing && (
+        <form onSubmit={submit} className="mt-4 rounded-md border border-ink/10 bg-paper p-4">
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Field label="Full name" value={form.fullName || ''} onChange={(fullName) => setForm({ ...form, fullName })} />
+            <Field label="ID / passport number" value={form.idNumber || ''} onChange={(idNumber) => setForm({ ...form, idNumber })} />
+            <Field type="date" label="Date of birth" value={form.dateOfBirth || ''} onChange={(dateOfBirth) => setForm({ ...form, dateOfBirth })} />
+            <Field type="email" label="Email address" value={form.email || ''} onChange={(email) => setForm({ ...form, email })} />
+            <div className="lg:col-span-2">
+              <Field label="Residential / business / postal address" value={form.address || ''} onChange={(address) => setForm({ ...form, address })} />
+            </div>
+            <Field type="number" label="Ownership / control %" value={form.ownershipPercentage || ''} onChange={(ownershipPercentage) => setForm({ ...form, ownershipPercentage })} />
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium">Control basis</span>
+              <select value={form.controlBasis || 'Direct shareholding above 5%'} onChange={(event) => setForm({ ...form, controlBasis: event.target.value })} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm">
+                {beneficialOwnerControlBasisOptions.map((option) => <option key={option}>{option}</option>)}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium">Interest held</span>
+              <select value={form.interestHeld || 'direct'} onChange={(event) => setForm({ ...form, interestHeld: event.target.value })} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm">
+                <option value="direct">Direct</option>
+                <option value="indirect">Indirect</option>
+                <option value="direct_and_indirect">Direct and indirect</option>
+                <option value="control">Control</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium">Nationality status</span>
+              <select value={form.nationalityStatus || 'unknown'} onChange={(event) => setForm({ ...form, nationalityStatus: event.target.value, verificationStatus: event.target.value === 'foreign_national' && form.verificationStatus === 'not_required' ? 'required' : form.verificationStatus })} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm">
+                <option value="unknown">Unknown</option>
+                <option value="south_african">South African</option>
+                <option value="foreign_national">Foreign national</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium">Verification status</span>
+              <select value={form.verificationStatus || 'not_required'} onChange={(event) => setForm({ ...form, verificationStatus: event.target.value })} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm">
+                <option value="not_required">Not required</option>
+                <option value="required">Required</option>
+                <option value="submitted">Submitted</option>
+                <option value="verified">Verified</option>
+              </select>
+            </label>
+            {(form.nationalityStatus || 'unknown') === 'foreign_national' && (
+              <>
+                <Field label="Country of birth" value={form.countryOfBirth || ''} onChange={(countryOfBirth) => setForm({ ...form, countryOfBirth })} />
+                <Field label="Passport issuing country" value={form.passportIssuingCountry || ''} onChange={(passportIssuingCountry) => setForm({ ...form, passportIssuingCountry })} />
+              </>
+            )}
+            <Field type="date" label="CIPC filing due date" value={form.cipcFilingDueDate || ''} onChange={(cipcFilingDueDate) => setForm({ ...form, cipcFilingDueDate })} />
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium">CIPC filing status</span>
+              <select value={form.cipcFilingStatus || 'not_started'} onChange={(event) => setForm({ ...form, cipcFilingStatus: event.target.value })} className="h-12 w-full rounded-md border border-ink/15 bg-white px-3 text-sm">
+                <option value="not_started">Not started</option>
+                <option value="ready">Ready</option>
+                <option value="filed">Filed</option>
+                <option value="overdue">Overdue</option>
+              </select>
+            </label>
+            <div className="lg:col-span-2">
+              <Field label="Source notes" value={form.notes || ''} onChange={(notes) => setForm({ ...form, notes })} />
+            </div>
+            <div className="lg:col-span-2">
+              <button disabled={isSaving || !form.fullName?.trim()} className="rounded-md bg-forest px-4 py-3 text-sm font-semibold text-white disabled:bg-ink/30">
+                {isSaving ? 'Saving...' : 'Save BO filing details'}
+              </button>
+            </div>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+function BoFilingStatusBadge({ status }) {
+  const styles = {
+    ready: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+    filed: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+    overdue: 'border-red-200 bg-red-50 text-red-800',
+    not_started: 'border-amber-200 bg-amber-50 text-amber-800'
+  };
+  const labels = {
+    ready: 'Ready for CIPC',
+    filed: 'Filed',
+    overdue: 'BO filing overdue',
+    not_started: 'Details incomplete'
+  };
+  return <span className={`rounded-full border px-2 py-1 text-xs font-semibold ${styles[status] || styles.not_started}`}>{labels[status] || labels.not_started}</span>;
+}
+
+function nationalityStatusLabel(status) {
+  const labels = {
+    south_african: 'South African',
+    foreign_national: 'Foreign national',
+    unknown: 'Unknown'
+  };
+  return labels[status] || labels.unknown;
+}
+
+function verificationStatusLabel(status) {
+  const labels = {
+    not_required: 'Not required',
+    required: 'Required',
+    submitted: 'Submitted',
+    verified: 'Verified'
+  };
+  return labels[status] || labels.not_required;
+}
+
+function interestHeldLabel(status) {
+  const labels = {
+    direct: 'Direct',
+    indirect: 'Indirect',
+    direct_and_indirect: 'Direct and indirect',
+    control: 'Control'
+  };
+  return labels[status] || labels.direct;
 }
 
 function TrustReviewPanel({ trustShareholders, trustReviews, onSaveTrustReview, onCreateBeneficialOwnersFromTrustReview, isSaving }) {
@@ -7518,6 +7777,7 @@ function activityActionLabel(action) {
     share_transaction_created: 'Share transaction created',
     share_transaction_updated: 'Share transaction updated',
     beneficial_owner_confirmed: 'Beneficial owner confirmed',
+    beneficial_owner_updated: 'Beneficial owner updated',
     beneficial_owner_removed: 'Beneficial owner removed',
     trust_review_saved: 'Trust review saved',
     trust_bo_records_created: 'Trust BO records created',
@@ -7911,6 +8171,111 @@ function entityReviewOwnersToBeneficialOwners(review, shareholder) {
     }));
 }
 
+function normalizeBeneficialOwnerFilingPayload(owner, company, existingOwner = null) {
+  const now = new Date().toISOString();
+  const idNumber = String(owner.idNumber ?? existingOwner?.idNumber ?? '').trim();
+  const nationalityStatus = owner.nationalityStatus || existingOwner?.nationalityStatus || inferNationalityStatus(idNumber);
+  const interestHeld = owner.interestHeld || existingOwner?.interestHeld || inferBoInterestHeld(owner.controlBasis || existingOwner?.controlBasis);
+  const lastChangedAt = owner.lastChangedAt || existingOwner?.lastChangedAt || now;
+  const cipcFilingDueDate = owner.cipcFilingDueDate || existingOwner?.cipcFilingDueDate || calculateBoFilingDueDate(company, lastChangedAt);
+  const verificationStatus = owner.verificationStatus || existingOwner?.verificationStatus || (nationalityStatus === 'foreign_national' ? 'required' : 'not_required');
+  const payload = {
+    shareholderId: owner.shareholderId || existingOwner?.shareholderId || null,
+    fullName: String(owner.fullName ?? existingOwner?.fullName ?? '').trim(),
+    idNumber,
+    ownershipPercentage: Number(owner.ownershipPercentage ?? existingOwner?.ownershipPercentage ?? 0),
+    controlBasis: owner.controlBasis || existingOwner?.controlBasis || 'Direct shareholding above 5%',
+    notes: owner.notes ?? existingOwner?.notes ?? '',
+    dateOfBirth: owner.dateOfBirth || existingOwner?.dateOfBirth || deriveDateOfBirthFromSaId(idNumber) || '',
+    address: owner.address ?? existingOwner?.address ?? '',
+    email: owner.email ?? existingOwner?.email ?? '',
+    nationalityStatus,
+    countryOfBirth: owner.countryOfBirth ?? existingOwner?.countryOfBirth ?? '',
+    passportIssuingCountry: owner.passportIssuingCountry ?? existingOwner?.passportIssuingCountry ?? '',
+    verificationStatus,
+    verificationDocumentId: owner.verificationDocumentId || existingOwner?.verificationDocumentId || '',
+    interestHeld,
+    lastChangedAt,
+    cipcFilingDueDate,
+    cipcFilingStatus: owner.cipcFilingStatus || existingOwner?.cipcFilingStatus || beneficialOwnerFilingStatus({ cipcFilingDueDate, nationalityStatus, verificationStatus })
+  };
+  payload.cipcFilingStatus = beneficialOwnerFilingStatus(payload);
+  return payload;
+}
+
+function beneficialOwnerDbPayload(payload) {
+  return {
+    shareholder_id: isUuid(payload.shareholderId) ? payload.shareholderId : null,
+    full_name: payload.fullName,
+    id_number: payload.idNumber || null,
+    ownership_percentage: payload.ownershipPercentage,
+    control_basis: payload.controlBasis,
+    notes: payload.notes || null,
+    date_of_birth: payload.dateOfBirth || null,
+    address: payload.address || null,
+    email: payload.email || null,
+    nationality_status: payload.nationalityStatus || 'unknown',
+    country_of_birth: payload.countryOfBirth || null,
+    passport_issuing_country: payload.passportIssuingCountry || null,
+    verification_status: payload.verificationStatus || 'not_required',
+    verification_document_id: isUuid(payload.verificationDocumentId) ? payload.verificationDocumentId : null,
+    interest_held: payload.interestHeld || 'direct',
+    last_changed_at: payload.lastChangedAt || new Date().toISOString(),
+    cipc_filing_due_date: payload.cipcFilingDueDate || null,
+    cipc_filing_status: payload.cipcFilingStatus || 'not_started'
+  };
+}
+
+function inferNationalityStatus(idNumber) {
+  if (!idNumber) return 'unknown';
+  return looksLikeSaId(idNumber) ? 'south_african' : 'foreign_national';
+}
+
+function inferBoInterestHeld(controlBasis) {
+  const basis = String(controlBasis || '').toLowerCase();
+  if (basis.includes('indirect')) return 'indirect';
+  if (basis.includes('control')) return 'control';
+  return 'direct';
+}
+
+function deriveDateOfBirthFromSaId(idNumber) {
+  const digits = String(idNumber || '').replace(/\D/g, '');
+  if (!looksLikeSaId(digits)) return '';
+  const yearPrefix = Number(digits.slice(0, 2)) <= Number(todayIsoDate().slice(2, 4)) ? '20' : '19';
+  const date = `${yearPrefix}${digits.slice(0, 2)}-${digits.slice(2, 4)}-${digits.slice(4, 6)}`;
+  return Number.isNaN(new Date(`${date}T00:00:00`).getTime()) ? '' : date;
+}
+
+function calculateBoFilingDueDate(company, lastChangedAt = null) {
+  const incorporationDate = company?.incorporationDate || company?.incorporation_date || '';
+  if (lastChangedAt) return addBusinessDays(new Date(lastChangedAt), 10).toISOString().slice(0, 10);
+  if (incorporationDate) return addBusinessDays(new Date(`${incorporationDate}T00:00:00`), 10).toISOString().slice(0, 10);
+  return addBusinessDays(new Date(), 10).toISOString().slice(0, 10);
+}
+
+function beneficialOwnerFilingStatus(owner) {
+  if (owner.cipcFilingStatus === 'filed') return 'filed';
+  if (owner.cipcFilingDueDate && owner.cipcFilingDueDate < todayIsoDate()) return 'overdue';
+  return beneficialOwnerMissingFields(owner).length === 0 ? 'ready' : 'not_started';
+}
+
+function beneficialOwnerMissingFields(owner) {
+  const missing = [];
+  if (!owner.fullName) missing.push('Full name');
+  if (!owner.idNumber) missing.push('ID/passport number');
+  if (!owner.dateOfBirth) missing.push('Date of birth');
+  if (!owner.address) missing.push('Address');
+  if (!owner.email) missing.push('Email address');
+  if (!owner.controlBasis) missing.push('Control basis');
+  if (!owner.interestHeld) missing.push('Direct/indirect interest');
+  if (owner.nationalityStatus === 'foreign_national') {
+    if (!owner.countryOfBirth) missing.push('Country of birth');
+    if (!owner.passportIssuingCountry) missing.push('Passport issuing country');
+    if (!['submitted', 'verified'].includes(owner.verificationStatus)) missing.push('Foreign ID/passport verification');
+  }
+  return missing;
+}
+
 function buildBoRegisterRows(shareholders, beneficialOwners = [], trustReviews = [], entityOwnershipReviews = []) {
   return shareholders.map((shareholder) => {
     const pct = Number(shareholder.ownershipPercentage || 0);
@@ -8120,17 +8485,22 @@ function assessBeneficialOwnership(shareholders, beneficialOwners = [], trustRev
   return { items };
 }
 
-function getReadinessChecklist(detail) {
+function getReadinessChecklist(detail, company = {}) {
   const hasDirectors = detail.directors.length > 0;
   const hasShareholders = detail.shareholders.length > 0;
   const confirmedBeneficialOwners = getFilingBeneficialOwners(detail);
   const hasBeneficialOwner = confirmedBeneficialOwners.length > 0;
+  const incompleteBoRecords = confirmedBeneficialOwners.filter((owner) => beneficialOwnerMissingFields(owner).length > 0);
+  const foreignVerificationRequired = confirmedBeneficialOwners.some((owner) => owner.nationalityStatus === 'foreign_national' && !['submitted', 'verified'].includes(owner.verificationStatus));
+  const boAmendmentDue = confirmedBeneficialOwners.some((owner) => owner.cipcFilingDueDate && owner.cipcFilingDueDate < todayIsoDate() && owner.cipcFilingStatus !== 'filed');
   const trustDetected = hasTrustShareholder(detail);
   const trustDeedReady = !trustDetected || hasDocument(detail, 'trust_deed');
   const shareRegisterReady = hasDocument(detail, 'share_register');
   const mandateReady = detail.mandatePrepared;
   const ownershipTotal = detail.shareholders.reduce((sum, shareholder) => sum + Number(shareholder.ownershipPercentage || 0), 0);
   const ownershipBalanced = hasShareholders && Math.abs(ownershipTotal - 100) < 0.01;
+  const annualDueDate = company?.nextDueDateRaw || calculateNextAnnualReturnDue(company?.incorporationDate);
+  const boAnnualDueDate = annualDueDate || '';
 
   const items = [
     {
@@ -8156,6 +8526,32 @@ function getReadinessChecklist(detail) {
       label: 'Beneficial owners identified',
       detail: hasBeneficialOwner ? `${confirmedBeneficialOwners.length} confirmed BO filing record${confirmedBeneficialOwners.length === 1 ? '' : 's'} captured.` : 'No confirmed natural-person BO filing record has been captured yet.',
       complete: hasBeneficialOwner
+    },
+    {
+      key: 'bo-filing-details',
+      label: 'BO filing details complete',
+      detail: incompleteBoRecords.length === 0 && hasBeneficialOwner
+        ? 'Mandatory CIPC details are captured for all confirmed BO records.'
+        : incompleteBoRecords.length
+          ? `${incompleteBoRecords.length} BO record${incompleteBoRecords.length === 1 ? '' : 's'} missing CIPC filing details.`
+          : 'Capture confirmed BO records before filing details can be checked.',
+      complete: hasBeneficialOwner && incompleteBoRecords.length === 0
+    },
+    {
+      key: 'bo-deadline',
+      label: boAmendmentDue ? 'BO amendment due' : 'BO declaration timeline',
+      detail: boAmendmentDue
+        ? 'One or more BO records have a filing due date that has passed.'
+        : boAnnualDueDate
+          ? `Annual BO declaration should be ready by annual return due date ${boAnnualDueDate}.`
+          : 'Confirm incorporation date to calculate the annual BO filing timeline.',
+      complete: hasBeneficialOwner && !boAmendmentDue
+    },
+    {
+      key: 'foreign-verification',
+      label: 'Foreign verification resolved',
+      detail: foreignVerificationRequired ? 'Foreign national BO records require submitted or verified passport/foreign ID verification.' : 'No outstanding foreign national verification requirement.',
+      complete: !foreignVerificationRequired
     },
     {
       key: 'trust-deed',
@@ -8283,11 +8679,12 @@ function getComplianceValidation(company, detail) {
   });
 
   (detail.beneficialOwners || []).forEach((owner) => {
-    if (!owner.idNumber) {
+    const missingFields = beneficialOwnerMissingFields(owner);
+    if (missingFields.length) {
       critical.push({
-        key: `bo-id-${owner.id}`,
-        title: 'Confirmed BO ID missing',
-        detail: `${owner.fullName} is in the filing register without an ID/passport number.`
+        key: `bo-filing-fields-${owner.id}`,
+        title: 'BO filing details incomplete',
+        detail: `${owner.fullName} is missing: ${missingFields.join(', ')}.`
       });
     }
     if (owner.idNumber && looksLikeSaId(owner.idNumber) && !isValidSaIdNumber(owner.idNumber)) {
@@ -8297,11 +8694,18 @@ function getComplianceValidation(company, detail) {
         detail: `${owner.fullName} has an ID number that does not pass the checksum.`
       });
     }
-    if (!owner.controlBasis) {
+    if (owner.nationalityStatus === 'foreign_national' && !['submitted', 'verified'].includes(owner.verificationStatus)) {
       critical.push({
-        key: `bo-control-${owner.id}`,
-        title: 'Control basis missing',
-        detail: `${owner.fullName} needs a control basis before filing.`
+        key: `bo-foreign-verification-${owner.id}`,
+        title: 'Foreign verification required',
+        detail: `${owner.fullName} must have certified passport or foreign identity verification submitted before filing.`
+      });
+    }
+    if (owner.cipcFilingDueDate && owner.cipcFilingDueDate < todayIsoDate() && owner.cipcFilingStatus !== 'filed') {
+      critical.push({
+        key: `bo-filing-overdue-${owner.id}`,
+        title: 'BO amendment due',
+        detail: `${owner.fullName} has a BO filing due date of ${owner.cipcFilingDueDate}.`
       });
     }
     if (!owner.shareholderId && !owner.notes) {
@@ -8628,8 +9032,29 @@ function restoreDataTypeConfig(type) {
       label: 'Beneficial owners',
       table: 'beneficial_owners',
       detailKey: 'beneficialOwners',
-      select: 'id, company_id, shareholder_id, full_name, id_number, ownership_percentage, control_basis, notes, created_at',
-      payload: (row, company) => cleanPayload({ id: uuidOrUndefined(row.id), company_id: company?.id, shareholder_id: uuidOrNull(valueByHeader(row, ['shareholder_id'])), full_name: valueByHeader(row, ['full_name']), id_number: valueByHeader(row, ['id_number']) || null, ownership_percentage: Number(valueByHeader(row, ['ownership_percentage']) || 0), control_basis: valueByHeader(row, ['control_basis']) || null, notes: valueByHeader(row, ['notes']) || null }),
+      select: BENEFICIAL_OWNER_SELECT_WITH_COMPANY,
+      payload: (row, company) => cleanPayload({
+        id: uuidOrUndefined(row.id),
+        company_id: company?.id,
+        shareholder_id: uuidOrNull(valueByHeader(row, ['shareholder_id'])),
+        full_name: valueByHeader(row, ['full_name']),
+        id_number: valueByHeader(row, ['id_number']) || null,
+        ownership_percentage: Number(valueByHeader(row, ['ownership_percentage']) || 0),
+        control_basis: valueByHeader(row, ['control_basis']) || null,
+        notes: valueByHeader(row, ['notes']) || null,
+        date_of_birth: normalizeImportDate(valueByHeader(row, ['date_of_birth', 'dateOfBirth'])) || null,
+        address: valueByHeader(row, ['address']) || null,
+        email: valueByHeader(row, ['email']) || null,
+        nationality_status: valueByHeader(row, ['nationality_status', 'nationalityStatus']) || 'unknown',
+        country_of_birth: valueByHeader(row, ['country_of_birth', 'countryOfBirth']) || null,
+        passport_issuing_country: valueByHeader(row, ['passport_issuing_country', 'passportIssuingCountry']) || null,
+        verification_status: valueByHeader(row, ['verification_status', 'verificationStatus']) || 'not_required',
+        verification_document_id: uuidOrNull(valueByHeader(row, ['verification_document_id', 'verificationDocumentId'])),
+        interest_held: valueByHeader(row, ['interest_held', 'interestHeld']) || 'direct',
+        last_changed_at: valueByHeader(row, ['last_changed_at', 'lastChangedAt']) || null,
+        cipc_filing_due_date: normalizeImportDate(valueByHeader(row, ['cipc_filing_due_date', 'cipcFilingDueDate'])) || null,
+        cipc_filing_status: valueByHeader(row, ['cipc_filing_status', 'cipcFilingStatus']) || 'not_started'
+      }),
       validate: (payload, errors) => { if (!payload.full_name) errors.push('BO name missing'); },
       mapRow: mapBeneficialOwnerRow,
       localMap: (row) => ({ companyId: row.company_id, ...mapBeneficialOwnerRow(row) }),
@@ -8850,11 +9275,11 @@ function calculateNextAnnualReturnDue(incorporationDate, afterDate = todayIsoDat
 
   let year = after.getFullYear();
   let anniversary = new Date(year, incorporation.getMonth(), incorporation.getDate());
-  let due = addDays(anniversary, 30);
+  let due = addBusinessDays(anniversary, 30);
   while (due <= after) {
     year += 1;
     anniversary = new Date(year, incorporation.getMonth(), incorporation.getDate());
-    due = addDays(anniversary, 30);
+    due = addBusinessDays(anniversary, 30);
   }
   return due.toISOString().slice(0, 10);
 }
@@ -8862,6 +9287,18 @@ function calculateNextAnnualReturnDue(incorporationDate, afterDate = todayIsoDat
 function addDays(date, days) {
   const next = new Date(date);
   next.setDate(next.getDate() + days);
+  return next;
+}
+
+function addBusinessDays(date, days) {
+  const next = new Date(date);
+  if (Number.isNaN(next.getTime())) return addDays(new Date(), days);
+  let added = 0;
+  while (added < days) {
+    next.setDate(next.getDate() + 1);
+    const day = next.getDay();
+    if (day !== 0 && day !== 6) added += 1;
+  }
   return next;
 }
 
@@ -9382,7 +9819,7 @@ function taskSortDate(task) {
 
 function buildAuditReportCsv(company, detail) {
   const validation = getComplianceValidation(company, detail);
-  const readiness = getReadinessChecklist(detail);
+  const readiness = getReadinessChecklist(detail, company);
   const rows = [
     ['SecretarialDesk Audit Report'],
     ['Company name', company.name],
@@ -9492,7 +9929,7 @@ function buildAuditReportPdf(jsPDF, company, detail) {
   const margin = 48;
   let y = 54;
   const validation = getComplianceValidation(company, detail);
-  const readiness = getReadinessChecklist(detail);
+  const readiness = getReadinessChecklist(detail, company);
 
   addPdfHeader(doc, 'BO Compliance Audit Report');
   y = addPdfCompanyBlock(doc, company, y + 38);
@@ -9587,14 +10024,26 @@ function buildBoRegisterCsv(company, detail) {
   const filingOwners = getFilingBeneficialOwners(detail);
   if (filingOwners.length) {
     rows.push(['Confirmed filing records']);
+    rows.push(['Full name', 'ID/passport number', 'Date of birth', 'Address', 'Email', 'Nationality status', 'Country of birth', 'Passport issuing country', 'Ownership %', 'Interest held', 'Control basis', 'Verification status', 'CIPC due date', 'Filing status', 'Reviewed at', 'Source notes', 'Missing fields']);
     filingOwners.forEach((owner) => {
       rows.push([
         owner.fullName,
-        'Natural person',
         owner.idNumber || '',
+        owner.dateOfBirth || '',
+        owner.address || '',
+        owner.email || '',
+        nationalityStatusLabel(owner.nationalityStatus),
+        owner.countryOfBirth || '',
+        owner.passportIssuingCountry || '',
         owner.ownershipPercentage,
+        interestHeldLabel(owner.interestHeld),
         owner.controlBasis,
-        owner.notes || ''
+        verificationStatusLabel(owner.verificationStatus),
+        owner.cipcFilingDueDate || '',
+        beneficialOwnerFilingStatus(owner),
+        formatDateTime(owner.lastChangedAt || owner.createdAt),
+        owner.notes || '',
+        beneficialOwnerMissingFields(owner).join('; ')
       ]);
     });
     rows.push([]);
@@ -9667,15 +10116,15 @@ function buildMandateText(company, detail) {
     `Prepared date: ${new Date().toLocaleDateString('en-ZA')}`,
     '',
     'Authorisation',
-    'The company authorises the appointed accounting practice to prepare and submit Beneficial Ownership information and supporting records to CIPC based on the reviewed company records.',
+    'The company authorises the appointed accounting practice to prepare and submit the Beneficial Ownership Declaration, securities/share register or beneficial interest register, and supporting mandate records to CIPC based on the reviewed company records.',
     '',
     'Beneficial owners identified',
     ...(beneficialOwners.length
-      ? beneficialOwners.map((owner) => `- ${owner.fullName} (${owner.idNumber || 'ID not captured'}): ${owner.ownershipPercentage}% - ${owner.controlBasis}`)
+      ? beneficialOwners.map((owner) => `- ${owner.fullName} (${owner.idNumber || 'ID not captured'}): ${owner.ownershipPercentage}% - ${owner.controlBasis}; CIPC details ${beneficialOwnerMissingFields(owner).length ? 'incomplete' : 'complete'}`)
       : ['- No natural person beneficial owner over >5% captured. Manual review required.']),
     '',
     'Outstanding review notes',
-    ...getReadinessChecklist(detail).items.filter((item) => !item.complete).map((item) => `- ${item.label}: ${item.detail}`),
+    ...getReadinessChecklist(detail, company).items.filter((item) => !item.complete).map((item) => `- ${item.label}: ${item.detail}`),
     '',
     'Signed for and on behalf of the company:',
     '',
@@ -9687,19 +10136,7 @@ function buildMandateText(company, detail) {
 }
 
 function getFilingBeneficialOwners(detail) {
-  if ((detail.beneficialOwners || []).length > 0) return detail.beneficialOwners || [];
-
-  return (detail.shareholders || [])
-    .filter((shareholder) => shareholder.shareholderType === 'natural_person' && Number(shareholder.ownershipPercentage) > 5)
-    .map((shareholder) => ({
-      id: shareholder.id,
-      shareholderId: shareholder.id,
-      fullName: shareholder.name,
-      idNumber: shareholder.idNumber,
-      ownershipPercentage: shareholder.ownershipPercentage,
-      controlBasis: 'Direct shareholding above 5%',
-      notes: ''
-    }));
+  return detail.beneficialOwners || [];
 }
 
 function buildBoRegisterPdf(jsPDF, company, detail) {
@@ -9723,10 +10160,14 @@ function buildBoRegisterPdf(jsPDF, company, detail) {
       y = addPdfKeyValue(
         doc,
         owner.fullName,
-        `${owner.idNumber || 'ID not captured'} | ${owner.ownershipPercentage}% | ${owner.controlBasis}${owner.notes ? ` | Notes: ${owner.notes}` : ''}`,
+        `${owner.idNumber || 'ID not captured'} | DOB: ${owner.dateOfBirth || 'Not captured'} | ${owner.ownershipPercentage}% | ${interestHeldLabel(owner.interestHeld)} | ${owner.controlBasis}`,
         margin,
         y
       );
+      y = addPdfParagraph(doc, `Address: ${owner.address || 'Not captured'} | Email: ${owner.email || 'Not captured'} | Nationality: ${nationalityStatusLabel(owner.nationalityStatus)} | Verification: ${verificationStatusLabel(owner.verificationStatus)} | Due: ${owner.cipcFilingDueDate || 'Not set'} | Reviewed: ${formatDateTime(owner.lastChangedAt || owner.createdAt) || 'Not captured'}`, margin, y);
+      const missing = beneficialOwnerMissingFields(owner);
+      if (missing.length) y = addPdfParagraph(doc, `Missing CIPC fields: ${missing.join(', ')}`, margin, y);
+      if (owner.notes) y = addPdfParagraph(doc, `Source notes: ${owner.notes}`, margin, y);
       y = ensurePdfSpace(doc, y, 70);
     });
   }
@@ -9774,7 +10215,7 @@ function buildBoRegisterPdf(jsPDF, company, detail) {
   doc.setFont('helvetica', 'bold');
   doc.text('Readiness Checklist', margin, y);
   y += 22;
-  getReadinessChecklist(detail).items.forEach((item) => {
+  getReadinessChecklist(detail, company).items.forEach((item) => {
     y = addPdfParagraph(doc, `${item.complete ? '[Complete]' : '[Outstanding]'} ${item.label}: ${item.detail}`, margin, y);
     y = ensurePdfSpace(doc, y, 50);
   });
@@ -9801,7 +10242,7 @@ function buildMandatePdf(jsPDF, company, detail) {
   y += 22;
   y = addPdfParagraph(
     doc,
-    'The company authorises the appointed accounting practice to prepare and submit Beneficial Ownership information and supporting records to CIPC based on the reviewed company records.',
+    'The company authorises the appointed accounting practice to prepare and submit the Beneficial Ownership Declaration, securities/share register or beneficial interest register, and supporting mandate records to CIPC based on the reviewed company records.',
     margin,
     y
   );
@@ -9816,7 +10257,7 @@ function buildMandatePdf(jsPDF, company, detail) {
     y = addPdfParagraph(doc, 'No confirmed natural-person BO filing record captured. Manual review required.', margin, y);
   } else {
     beneficialOwners.forEach((owner) => {
-      y = addPdfParagraph(doc, `${owner.fullName} (${owner.idNumber || 'ID not captured'}): ${owner.ownershipPercentage}% - ${owner.controlBasis}${owner.notes ? ` - ${owner.notes}` : ''}`, margin, y);
+      y = addPdfParagraph(doc, `${owner.fullName} (${owner.idNumber || 'ID not captured'}): ${owner.ownershipPercentage}% - ${owner.controlBasis} - CIPC details ${beneficialOwnerMissingFields(owner).length ? 'incomplete' : 'complete'}${owner.notes ? ` - ${owner.notes}` : ''}`, margin, y);
     });
   }
 
@@ -9824,7 +10265,7 @@ function buildMandatePdf(jsPDF, company, detail) {
   doc.setFont('helvetica', 'bold');
   doc.text('Outstanding Review Notes', margin, y);
   y += 22;
-  const outstanding = getReadinessChecklist(detail).items.filter((item) => !item.complete);
+  const outstanding = getReadinessChecklist(detail, company).items.filter((item) => !item.complete);
   if (outstanding.length === 0) {
     y = addPdfParagraph(doc, 'No outstanding readiness items recorded.', margin, y);
   } else {
